@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+from langsmith import traceable
 from openai import AsyncOpenAI
 
 from app.services.copilot.tools.context import ToolContext
@@ -16,6 +17,16 @@ from app.services.copilot.tools.executor import execute_tool
 from app.services.copilot.tools.schemas import EscalationStructured, SupportIntelligenceStructured
 
 logger = logging.getLogger(__name__)
+
+
+@traceable(name="copilot.model.tool_agent_round", run_type="llm")
+async def _responses_create_tool_agent(client: AsyncOpenAI, **kwargs: Any) -> Any:
+    return await client.responses.create(**kwargs)
+
+
+@traceable(name="copilot.model.structured_synthesis", run_type="llm")
+async def _responses_create_synthesis(client: AsyncOpenAI, **kwargs: Any) -> Any:
+    return await client.responses.create(**kwargs)
 
 # Structured output schema for the final support intelligence payload (strict JSON Schema subset).
 _SUPPORT_INTELLIGENCE_SCHEMA: dict[str, Any] = {
@@ -179,6 +190,7 @@ class ToolAgentResult:
     tool_trace: list[dict[str, Any]]
 
 
+@traceable(name="copilot.tool_agent_loop", run_type="chain")
 async def run_tool_agent_loop(
     *,
     api_key: str,
@@ -211,7 +223,7 @@ async def run_tool_agent_loop(
             kwargs["previous_response_id"] = previous_response_id
             kwargs["input"] = next_input
 
-        response = await client.responses.create(**kwargs)
+        response = await _responses_create_tool_agent(client, **kwargs)
         previous_response_id = response.id
 
         calls: list[Any] = [
@@ -250,6 +262,7 @@ async def run_tool_agent_loop(
     return ToolAgentResult(interim_assistant_text="", tool_trace=tool_trace)
 
 
+@traceable(name="copilot.final.structured_response", run_type="chain")
 async def synthesize_support_intelligence(
     *,
     api_key: str,
@@ -268,7 +281,8 @@ async def synthesize_support_intelligence(
         "tool_trace": tool_trace,
         "interim_assistant_analysis": interim_assistant_text.strip(),
     }
-    response = await client.responses.create(
+    response = await _responses_create_synthesis(
+        client,
         model=model,
         instructions=(
             "You produce the final Support Intelligence JSON for the UI. "

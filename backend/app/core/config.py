@@ -87,6 +87,19 @@ class Settings(BaseSettings):
     )
     copilot_max_history_messages: int = Field(default=12, ge=0, le=50)
 
+    langsmith_tracing: bool = Field(
+        default=False,
+        description="When true, emit LangSmith runs for retrieval, tools, model, and synthesis.",
+    )
+    langsmith_api_key: str | None = Field(
+        default=None,
+        description="LangSmith API key (optional when tracing is off).",
+    )
+    langsmith_project: str = Field(
+        default="signal-desk",
+        description="LangSmith project name for grouped traces.",
+    )
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def cors_origin_list(self) -> list[str]:

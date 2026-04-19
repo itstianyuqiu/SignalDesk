@@ -9,5 +9,6 @@ asyncpg>=0.30.0,<1.0.0
 pgvector>=0.3.0,<1.0.0
 greenlet>=3.0.0,<4.0.0
 openai>=1.59.0,<2.0.0
+langsmith>=0.1.129,<1.0.0
 pypdf>=5.0.0,<6.0.0
 PyJWT[crypto]>=2.9.0,<3.0.0

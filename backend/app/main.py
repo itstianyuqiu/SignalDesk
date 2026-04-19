@@ -1,5 +1,10 @@
 import logging
 
+from app.core.config import get_settings
+from app.services.observability.langsmith_setup import configure_langsmith
+
+configure_langsmith(get_settings())
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +18,6 @@ import app.models.document  # noqa: F401
 
 from app.api.v1.health import router as health_router
 from app.api.v1.router import api_router as api_v1_router
-from app.core.config import get_settings
 
 _log = logging.getLogger("app.main")
 

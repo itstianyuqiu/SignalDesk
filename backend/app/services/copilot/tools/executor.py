@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 from uuid import UUID
 
+from langsmith import traceable
 from pydantic import ValidationError
 
 from app.models.case import Case
@@ -39,6 +41,7 @@ def _excerpt(text: str) -> str:
     return ex
 
 
+@traceable(name="copilot.tool.execute", run_type="tool")
 async def execute_tool(
     name: str,
     raw_arguments: str,
@@ -48,6 +51,7 @@ async def execute_tool(
     Run a named tool with JSON arguments from the model.
     Returns a JSON-serializable dict (success or ToolError).
     """
+    t0 = time.perf_counter()
     try:
         data = json.loads(raw_arguments) if raw_arguments.strip() else {}
     except json.JSONDecodeError as exc:
@@ -55,18 +59,25 @@ async def execute_tool(
 
     try:
         if name == "search_documents":
-            return await _search_documents(data, ctx)
-        if name == "get_case_summary":
-            return await _get_case_summary(data, ctx)
-        if name == "extract_action_items":
-            return await _extract_action_items(data, ctx)
-        if name == "draft_support_reply":
-            return await _draft_support_reply(data, ctx)
+            out = await _search_documents(data, ctx)
+        elif name == "get_case_summary":
+            out = await _get_case_summary(data, ctx)
+        elif name == "extract_action_items":
+            out = await _extract_action_items(data, ctx)
+        elif name == "draft_support_reply":
+            out = await _draft_support_reply(data, ctx)
+        else:
+            out = ToolError(error="unknown_tool", detail=name).model_dump()
     except Exception as exc:  # noqa: BLE001 — surface as tool result, not HTTP 500
         logger.exception("tool_execution_failed", extra={"tool": name})
-        return ToolError(error="execution_failed", detail=f"{type(exc).__name__}: {exc}").model_dump()
+        out = ToolError(error="execution_failed", detail=f"{type(exc).__name__}: {exc}").model_dump()
+    finally:
+        if ctx.metrics is not None:
+            elapsed = (time.perf_counter() - t0) * 1000.0
+            ctx.metrics.tools_dispatch_ms += elapsed
+            ctx.metrics.tool_calls += 1
 
-    return ToolError(error="unknown_tool", detail=name).model_dump()
+    return out
 
 
 async def _search_documents(data: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
@@ -78,6 +89,7 @@ async def _search_documents(data: dict[str, Any], ctx: ToolContext) -> dict[str,
     if not ctx.settings.openai_api_key:
         return ToolError(error="misconfigured", detail="Embeddings API unavailable.").model_dump()
 
+    t_ret = time.perf_counter()
     try:
         chunks = await retrieve_chunks(
             ctx.db,
@@ -88,6 +100,9 @@ async def _search_documents(data: dict[str, Any], ctx: ToolContext) -> dict[str,
         )
     except ValueError as exc:
         return ToolError(error="retrieval_error", detail=str(exc)).model_dump()
+    finally:
+        if ctx.metrics is not None:
+            ctx.metrics.retrieval_ms += (time.perf_counter() - t_ret) * 1000.0
 
     weak = not chunks or max(ch.score for ch in chunks) < ctx.min_evidence_score
     hits = [

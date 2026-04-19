@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import time
 from typing import Any
 from uuid import UUID
 
+from langsmith import traceable
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +20,8 @@ from app.services.copilot.openai_responses import (
 )
 from app.services.copilot.prompts import build_copilot_tool_agent_bundle
 from app.services.copilot.tools.context import ToolContext
+from app.services.observability.turn_metrics import CopilotTurnMetrics
+from app.services.observability.turn_observability import build_observability_metadata
 
 
 @dataclass(frozen=True)
@@ -139,6 +143,7 @@ def _history_lines(msgs: list[ChatMessage]) -> list[str]:
     return lines
 
 
+@traceable(name="copilot.turn", run_type="chain")
 async def run_copilot_turn(
     session: AsyncSession,
     *,
@@ -153,6 +158,8 @@ async def run_copilot_turn(
     text = message.strip()
     if not text:
         raise ValueError("Message must not be empty.")
+
+    turn_t0 = time.perf_counter()
 
     if session_id is None:
         title = text.replace("\r\n", " ")[:120] or "Copilot"
@@ -196,13 +203,16 @@ async def run_copilot_turn(
         user_question=text,
         history_lines=history_lines,
     )
+    metrics = CopilotTurnMetrics()
     tool_ctx = ToolContext(
         db=session,
         user_id=user_id,
         settings=settings,
         min_evidence_score=settings.copilot_min_evidence_score,
+        metrics=metrics,
     )
 
+    t_agent = time.perf_counter()
     agent = await run_tool_agent_loop(
         api_key=settings.openai_api_key,
         model=settings.copilot_model,
@@ -210,7 +220,9 @@ async def run_copilot_turn(
         user_input=bundle.user_input,
         ctx=tool_ctx,
     )
+    agent_loop_ms = (time.perf_counter() - t_agent) * 1000.0
 
+    t_syn = time.perf_counter()
     structured = await synthesize_support_intelligence(
         api_key=settings.openai_api_key,
         model=settings.copilot_model,
@@ -218,6 +230,7 @@ async def run_copilot_turn(
         interim_assistant_text=agent.interim_assistant_text,
         tool_trace=agent.tool_trace,
     )
+    synthesis_ms = (time.perf_counter() - t_syn) * 1000.0
 
     answer = structured.answer.strip() or (
         "I could not generate a response. Please try again or check API configuration."
@@ -225,6 +238,16 @@ async def run_copilot_turn(
     sources = _aggregate_sources_from_tool_trace(agent.tool_trace)
     weak = _weak_evidence_from_tool_trace(agent.tool_trace)
     structured_dict = structured.model_dump()
+    total_wall_ms = (time.perf_counter() - turn_t0) * 1000.0
+    observability = build_observability_metadata(
+        settings=settings,
+        metrics=metrics,
+        agent_loop_ms=agent_loop_ms,
+        synthesis_ms=synthesis_ms,
+        total_wall_ms=total_wall_ms,
+        tool_trace=agent.tool_trace,
+        weak_evidence=weak,
+    )
 
     assistant_pos = pos + 1
     assistant_row = ChatMessage(
@@ -240,6 +263,7 @@ async def run_copilot_turn(
             "structured": structured_dict,
             "tools": agent.tool_trace,
             "interim_assistant_text": agent.interim_assistant_text,
+            "observability": observability,
         },
     )
     session.add(assistant_row)
@@ -282,6 +306,8 @@ async def stream_copilot_turn(
     if not text:
         raise ValueError("Message must not be empty.")
 
+    turn_t0 = time.perf_counter()
+
     if session_id is None:
         title = text.replace("\r\n", " ")[:120] or "Copilot"
         chat = ChatSession(
@@ -320,13 +346,16 @@ async def stream_copilot_turn(
         user_question=text,
         history_lines=history_lines,
     )
+    metrics = CopilotTurnMetrics()
     tool_ctx = ToolContext(
         db=session,
         user_id=user_id,
         settings=settings,
         min_evidence_score=settings.copilot_min_evidence_score,
+        metrics=metrics,
     )
 
+    t_agent = time.perf_counter()
     agent = await run_tool_agent_loop(
         api_key=settings.openai_api_key,
         model=settings.copilot_model,
@@ -334,6 +363,7 @@ async def stream_copilot_turn(
         user_input=bundle.user_input,
         ctx=tool_ctx,
     )
+    agent_loop_ms = (time.perf_counter() - t_agent) * 1000.0
 
     for step in agent.tool_trace:
         yield {
@@ -344,6 +374,7 @@ async def stream_copilot_turn(
             "result": step.get("result"),
         }
 
+    t_syn = time.perf_counter()
     structured = await synthesize_support_intelligence(
         api_key=settings.openai_api_key,
         model=settings.copilot_model,
@@ -351,6 +382,7 @@ async def stream_copilot_turn(
         interim_assistant_text=agent.interim_assistant_text,
         tool_trace=agent.tool_trace,
     )
+    synthesis_ms = (time.perf_counter() - t_syn) * 1000.0
 
     answer = structured.answer.strip() or (
         "I could not generate a streamed response. Please try again."
@@ -358,6 +390,16 @@ async def stream_copilot_turn(
     sources = _aggregate_sources_from_tool_trace(agent.tool_trace)
     weak = _weak_evidence_from_tool_trace(agent.tool_trace)
     structured_dict = structured.model_dump()
+    total_wall_ms = (time.perf_counter() - turn_t0) * 1000.0
+    observability = build_observability_metadata(
+        settings=settings,
+        metrics=metrics,
+        agent_loop_ms=agent_loop_ms,
+        synthesis_ms=synthesis_ms,
+        total_wall_ms=total_wall_ms,
+        tool_trace=agent.tool_trace,
+        weak_evidence=weak,
+    )
 
     yield {
         "event": "meta",
@@ -381,6 +423,7 @@ async def stream_copilot_turn(
             "structured": structured_dict,
             "tools": agent.tool_trace,
             "interim_assistant_text": agent.interim_assistant_text,
+            "observability": observability,
         },
     )
     session.add(assistant_row)

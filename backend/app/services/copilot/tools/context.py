@@ -8,6 +8,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.services.observability.turn_metrics import CopilotTurnMetrics
 
 
 @dataclass(frozen=True)
@@ -18,3 +19,4 @@ class ToolContext:
     user_id: UUID
     settings: Settings
     min_evidence_score: float
+    metrics: CopilotTurnMetrics | None = None

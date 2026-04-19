@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from uuid import UUID
 
+from langsmith import traceable
 from pgvector import Vector as PGVector
 from sqlalchemy import Select, and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +32,7 @@ def _score_from_cosine_distance(distance: float) -> float:
     return max(0.0, min(1.0, 1.0 - (distance / 2.0)))
 
 
+@traceable(name="retrieval.retrieve_chunks", run_type="retriever")
 async def retrieve_chunks(
     session: AsyncSession,
     *,

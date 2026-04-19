@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "name": "signal-desk-smoke",
+  "cases": [
+    {
+      "id": "grounded-with-citation",
+      "grounding_corpus": "Widget X ships in 5 business days per policy DOC-42. Returns accepted within 30 days.",
+      "expectations": {
+        "groundedness_min": 0.08,
+        "answer_must_mention": ["Widget X", "5 business days"],
+        "escalation_level": "none",
+        "structured_required_fields": ["answer", "action_items", "escalation"]
+      },
+      "model_output": {
+        "answer": "Per DOC-42, Widget X ships in 5 business days.",
+        "action_items": [],
+        "escalation": { "level": "none", "rationale": "Policy covers shipping timeline." },
+        "support_reply_draft": null
+      }
+    },
+    {
+      "id": "minimal-grounded",
+      "grounding_corpus": "Hello world guidance document for training.",
+      "expectations": {
+        "groundedness_min": 0.02
+      },
+      "model_output": {
+        "answer": "Hello world from the guidance document.",
+        "action_items": [],
+        "escalation": { "level": "none", "rationale": "No escalation needed." },
+        "support_reply_draft": null
+      }
+    }
+  ]
+}

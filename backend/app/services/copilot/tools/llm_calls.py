@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from langsmith import traceable
 from openai import AsyncOpenAI
 
 from app.services.copilot.tools.schemas import (
@@ -53,6 +54,7 @@ _ACTION_ITEMS_SCHEMA: dict[str, Any] = {
 }
 
 
+@traceable(name="copilot.model.tool_helper.extract_action_items", run_type="llm")
 async def llm_extract_action_items(
     *,
     api_key: str,
@@ -119,6 +121,7 @@ _DRAFT_SCHEMA: dict[str, Any] = {
 }
 
 
+@traceable(name="copilot.model.tool_helper.draft_support_reply", run_type="llm")
 async def llm_draft_support_reply(
     *,
     api_key: str,
