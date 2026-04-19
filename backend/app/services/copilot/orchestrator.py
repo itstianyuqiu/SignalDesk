@@ -1,9 +1,10 @@
-"""RAG copilot turn orchestration (retrieval + LLM + persistence)."""
+"""Copilot turn orchestration: tool calling, structured outputs, persistence."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -11,9 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.models.chat import ChatMessage, ChatSession
-from app.services.copilot.openai_responses import generate_answer, stream_answer
-from app.services.copilot.prompts import build_rag_prompt_bundle
-from app.services.retrieval import RetrievedChunk, retrieve_chunks
+from app.services.copilot.openai_responses import (
+    run_tool_agent_loop,
+    synthesize_support_intelligence,
+)
+from app.services.copilot.prompts import build_copilot_tool_agent_bundle
+from app.services.copilot.tools.context import ToolContext
 
 
 @dataclass(frozen=True)
@@ -33,24 +37,8 @@ class CopilotTurnResult:
     answer: str
     sources: list[SourceOut]
     weak_evidence: bool
-
-
-def _chunks_to_sources(chunks: list[RetrievedChunk], *, excerpt_len: int = 320) -> list[SourceOut]:
-    out: list[SourceOut] = []
-    for ch in chunks:
-        ex = ch.content.strip().replace("\r\n", "\n")
-        if len(ex) > excerpt_len:
-            ex = ex[:excerpt_len] + "…"
-        out.append(
-            SourceOut(
-                chunk_id=ch.chunk_id,
-                document_id=ch.document_id,
-                title=ch.title,
-                score=float(ch.score),
-                excerpt=ex,
-            )
-        )
-    return out
+    structured: dict[str, Any]
+    tool_trace: list[dict[str, Any]]
 
 
 def _serialize_sources(sources: list[SourceOut]) -> list[dict]:
@@ -66,10 +54,49 @@ def _serialize_sources(sources: list[SourceOut]) -> list[dict]:
     ]
 
 
-def _weak_evidence_flag(chunks: list[RetrievedChunk], *, min_score: float) -> bool:
-    if not chunks:
+def _aggregate_sources_from_tool_trace(tool_trace: list[dict[str, Any]]) -> list[SourceOut]:
+    """Merge `search_documents` hits (retrieval layer — surfaced via tool results only)."""
+    best: dict[UUID, SourceOut] = {}
+    for step in tool_trace:
+        if step.get("name") != "search_documents":
+            continue
+        res = step.get("result")
+        if not isinstance(res, dict) or not res.get("ok"):
+            continue
+        for h in res.get("hits") or []:
+            if not isinstance(h, dict):
+                continue
+            try:
+                cid = UUID(str(h.get("chunk_id")))
+                doc_id = UUID(str(h.get("document_id")))
+            except (TypeError, ValueError):
+                continue
+            sc = float(h.get("score", 0.0))
+            excerpt = str(h.get("excerpt", ""))
+            title = str(h.get("title", ""))
+            prev = best.get(cid)
+            if prev is None or sc > prev.score:
+                best[cid] = SourceOut(
+                    chunk_id=cid,
+                    document_id=doc_id,
+                    title=title,
+                    score=sc,
+                    excerpt=excerpt,
+                )
+    return sorted(best.values(), key=lambda s: (-s.score, str(s.chunk_id)))
+
+
+def _weak_evidence_from_tool_trace(tool_trace: list[dict[str, Any]]) -> bool:
+    searches = [
+        s["result"]
+        for s in tool_trace
+        if s.get("name") == "search_documents"
+        and isinstance(s.get("result"), dict)
+        and s["result"].get("ok") is True
+    ]
+    if not searches:
         return True
-    return max(ch.score for ch in chunks) < min_score
+    return all(s.get("weak_evidence", True) for s in searches)
 
 
 async def _next_message_position(session: AsyncSession, session_id: UUID) -> int:
@@ -161,41 +188,44 @@ async def run_copilot_turn(
         sid,
         max_messages=settings.copilot_max_history_messages,
     )
-    # Include the just-inserted user message in prompt context
     history_msgs = [m for m in prior if m.id != user_row.id]
     history_msgs.append(user_row)
     history_lines = _history_lines(history_msgs)
 
-    chunks = await retrieve_chunks(
-        session,
-        owner_id=user_id,
-        query=text,
-        top_k=settings.copilot_retrieval_top_k,
-        settings=settings,
-        document_ids=None,
-        tags=None,
-        source_types=None,
-    )
-    weak = _weak_evidence_flag(chunks, min_score=settings.copilot_min_evidence_score)
-    bundle = build_rag_prompt_bundle(
+    bundle = build_copilot_tool_agent_bundle(
         user_question=text,
         history_lines=history_lines,
-        chunks=chunks,
-        weak_evidence=weak,
+    )
+    tool_ctx = ToolContext(
+        db=session,
+        user_id=user_id,
+        settings=settings,
+        min_evidence_score=settings.copilot_min_evidence_score,
     )
 
-    answer = await generate_answer(
+    agent = await run_tool_agent_loop(
         api_key=settings.openai_api_key,
         model=settings.copilot_model,
         instructions=bundle.instructions,
         user_input=bundle.user_input,
+        ctx=tool_ctx,
     )
-    if not answer:
-        answer = (
-            "I could not generate a response. Please try again or check API configuration."
-        )
 
-    sources = _chunks_to_sources(chunks)
+    structured = await synthesize_support_intelligence(
+        api_key=settings.openai_api_key,
+        model=settings.copilot_model,
+        user_question=text,
+        interim_assistant_text=agent.interim_assistant_text,
+        tool_trace=agent.tool_trace,
+    )
+
+    answer = structured.answer.strip() or (
+        "I could not generate a response. Please try again or check API configuration."
+    )
+    sources = _aggregate_sources_from_tool_trace(agent.tool_trace)
+    weak = _weak_evidence_from_tool_trace(agent.tool_trace)
+    structured_dict = structured.model_dump()
+
     assistant_pos = pos + 1
     assistant_row = ChatMessage(
         session_id=sid,
@@ -206,7 +236,10 @@ async def run_copilot_turn(
             "sources": _serialize_sources(sources),
             "weak_evidence": weak,
             "model": settings.copilot_model,
-            "kind": "copilot_rag",
+            "kind": "copilot_tools",
+            "structured": structured_dict,
+            "tools": agent.tool_trace,
+            "interim_assistant_text": agent.interim_assistant_text,
         },
     )
     session.add(assistant_row)
@@ -226,6 +259,8 @@ async def run_copilot_turn(
         answer=answer,
         sources=sources,
         weak_evidence=weak,
+        structured=structured_dict,
+        tool_trace=agent.tool_trace,
     )
 
 
@@ -238,7 +273,7 @@ async def stream_copilot_turn(
     settings: Settings,
 ):
     """
-    Async generator yielding text fragments, then a final dict with ids + sources metadata.
+    Async generator: tool events, meta (sources), text deltas, then done with ids.
     """
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
@@ -281,38 +316,57 @@ async def stream_copilot_turn(
     history_msgs.append(user_row)
     history_lines = _history_lines(history_msgs)
 
-    chunks = await retrieve_chunks(
-        session,
-        owner_id=user_id,
-        query=text,
-        top_k=settings.copilot_retrieval_top_k,
-        settings=settings,
-    )
-    weak = _weak_evidence_flag(chunks, min_score=settings.copilot_min_evidence_score)
-    bundle = build_rag_prompt_bundle(
+    bundle = build_copilot_tool_agent_bundle(
         user_question=text,
         history_lines=history_lines,
-        chunks=chunks,
-        weak_evidence=weak,
     )
-    sources = _chunks_to_sources(chunks)
+    tool_ctx = ToolContext(
+        db=session,
+        user_id=user_id,
+        settings=settings,
+        min_evidence_score=settings.copilot_min_evidence_score,
+    )
 
-    yield {"event": "meta", "weak_evidence": weak, "sources": _serialize_sources(sources)}
-
-    buf: list[str] = []
-    async for delta in stream_answer(
+    agent = await run_tool_agent_loop(
         api_key=settings.openai_api_key,
         model=settings.copilot_model,
         instructions=bundle.instructions,
         user_input=bundle.user_input,
-    ):
-        if delta:
-            buf.append(delta)
-            yield {"event": "delta", "text": delta}
+        ctx=tool_ctx,
+    )
 
-    answer = "".join(buf).strip() or (
+    for step in agent.tool_trace:
+        yield {
+            "event": "tool",
+            "name": step.get("name"),
+            "call_id": step.get("call_id"),
+            "arguments": step.get("arguments"),
+            "result": step.get("result"),
+        }
+
+    structured = await synthesize_support_intelligence(
+        api_key=settings.openai_api_key,
+        model=settings.copilot_model,
+        user_question=text,
+        interim_assistant_text=agent.interim_assistant_text,
+        tool_trace=agent.tool_trace,
+    )
+
+    answer = structured.answer.strip() or (
         "I could not generate a streamed response. Please try again."
     )
+    sources = _aggregate_sources_from_tool_trace(agent.tool_trace)
+    weak = _weak_evidence_from_tool_trace(agent.tool_trace)
+    structured_dict = structured.model_dump()
+
+    yield {
+        "event": "meta",
+        "weak_evidence": weak,
+        "sources": _serialize_sources(sources),
+        "structured": structured_dict,
+    }
+
+    yield {"event": "delta", "text": answer}
 
     assistant_row = ChatMessage(
         session_id=sid,
@@ -323,7 +377,10 @@ async def stream_copilot_turn(
             "sources": _serialize_sources(sources),
             "weak_evidence": weak,
             "model": settings.copilot_model,
-            "kind": "copilot_rag_stream",
+            "kind": "copilot_tools_stream",
+            "structured": structured_dict,
+            "tools": agent.tool_trace,
+            "interim_assistant_text": agent.interim_assistant_text,
         },
     )
     session.add(assistant_row)
@@ -340,4 +397,6 @@ async def stream_copilot_turn(
         "user_message_id": str(user_row.id),
         "assistant_message_id": str(assistant_row.id),
         "answer": answer,
+        "structured": structured_dict,
+        "tool_trace": agent.tool_trace,
     }

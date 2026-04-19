@@ -12,12 +12,32 @@ type SourceChunk = {
   excerpt: string;
 };
 
+type ToolRecord = {
+  name?: string;
+  call_id?: string;
+  arguments?: string;
+  result?: unknown;
+};
+
+type StructuredSupport = {
+  answer?: string;
+  action_items?: Array<{
+    title: string;
+    priority?: string;
+    owner?: string | null;
+  }>;
+  escalation?: { level: string; rationale: string };
+  support_reply_draft?: string | null;
+};
+
 type UiMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
   weakEvidence?: boolean;
   sources?: SourceChunk[];
+  toolCalls?: ToolRecord[];
+  structured?: StructuredSupport | null;
 };
 
 const SESSION_KEY = "signaldesk_copilot_session_id";
@@ -70,7 +90,12 @@ export function CopilotPanel() {
       id: string;
       role: string;
       content: string;
-      metadata?: { sources?: SourceChunk[]; weak_evidence?: boolean };
+      metadata?: {
+        sources?: SourceChunk[];
+        weak_evidence?: boolean;
+        structured?: StructuredSupport;
+        tools?: ToolRecord[];
+      };
     }>;
     const ui: UiMessage[] = [];
     for (const m of rows) {
@@ -82,6 +107,8 @@ export function CopilotPanel() {
         content: m.content,
         weakEvidence: meta.weak_evidence,
         sources: meta.sources,
+        structured: meta.structured ?? null,
+        toolCalls: Array.isArray(meta.tools) ? meta.tools : [],
       });
     }
     setMessages(ui);
@@ -127,6 +154,8 @@ export function CopilotPanel() {
         content: "",
         sources: [],
         weakEvidence: false,
+        toolCalls: [],
+        structured: null,
       },
     ]);
 
@@ -180,9 +209,29 @@ export function CopilotPanel() {
           if (e.event === "meta") {
             const weak = Boolean(e.weak_evidence);
             const sources = Array.isArray(e.sources) ? (e.sources as SourceChunk[]) : [];
+            const structured =
+              e.structured && typeof e.structured === "object"
+                ? (e.structured as StructuredSupport)
+                : null;
             setMessages((prev) =>
               prev.map((m) =>
-                m.id === assistantId ? { ...m, weakEvidence: weak, sources } : m,
+                m.id === assistantId
+                  ? { ...m, weakEvidence: weak, sources, structured }
+                  : m,
+              ),
+            );
+          } else if (e.event === "tool") {
+            const rec: ToolRecord = {
+              name: typeof e.name === "string" ? e.name : undefined,
+              call_id: typeof e.call_id === "string" ? e.call_id : undefined,
+              arguments: typeof e.arguments === "string" ? e.arguments : undefined,
+              result: e.result,
+            };
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId
+                  ? { ...m, toolCalls: [...(m.toolCalls ?? []), rec] }
+                  : m,
               ),
             );
           } else if (e.event === "delta" && typeof e.text === "string") {
@@ -197,15 +246,29 @@ export function CopilotPanel() {
             setSessionId(sid);
             localStorage.setItem(SESSION_KEY, sid);
             const finalText = typeof e.answer === "string" ? e.answer : "";
-            if (finalText) {
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId && !m.content.trim()
-                    ? { ...m, content: finalText }
-                    : m,
-                ),
-              );
-            }
+            const doneStructured =
+              e.structured && typeof e.structured === "object"
+                ? (e.structured as StructuredSupport)
+                : null;
+            const doneTools = Array.isArray(e.tool_trace)
+              ? (e.tool_trace as ToolRecord[])
+              : null;
+            setMessages((prev) =>
+              prev.map((m) => {
+                if (m.id !== assistantId) return m;
+                let next = m;
+                if (finalText && !next.content.trim()) {
+                  next = { ...next, content: finalText };
+                }
+                if (doneStructured) {
+                  next = { ...next, structured: doneStructured };
+                }
+                if (doneTools && doneTools.length > 0) {
+                  next = { ...next, toolCalls: doneTools };
+                }
+                return next;
+              }),
+            );
           }
         }
       }
@@ -218,15 +281,29 @@ export function CopilotPanel() {
             setSessionId(ev.session_id);
             localStorage.setItem(SESSION_KEY, ev.session_id);
             const tailText = typeof ev.answer === "string" ? ev.answer : "";
-            if (tailText) {
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId && !m.content.trim()
-                    ? { ...m, content: tailText }
-                    : m,
-                ),
-              );
-            }
+            const tailStructured =
+              ev.structured && typeof ev.structured === "object"
+                ? (ev.structured as StructuredSupport)
+                : null;
+            const tailTools = Array.isArray(ev.tool_trace)
+              ? (ev.tool_trace as ToolRecord[])
+              : null;
+            setMessages((prev) =>
+              prev.map((m) => {
+                if (m.id !== assistantId) return m;
+                let next = m;
+                if (tailText && !next.content.trim()) {
+                  next = { ...next, content: tailText };
+                }
+                if (tailStructured) {
+                  next = { ...next, structured: tailStructured };
+                }
+                if (tailTools && tailTools.length > 0) {
+                  next = { ...next, toolCalls: tailTools };
+                }
+                return next;
+              }),
+            );
           }
         } catch {
           /* ignore */
@@ -243,8 +320,8 @@ export function CopilotPanel() {
     <div className="flex min-h-[60vh] flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm text-shell-muted">
-          Answers use your indexed documents only; sources below are retrieved passages, not
-          free-form citations.
+          The copilot calls tools (document search, case summary, action items, reply drafts) and
+          returns a structured support summary. Tool results are shown below each answer.
         </p>
         <button
           type="button"
@@ -265,8 +342,8 @@ export function CopilotPanel() {
         <div className="max-h-[min(70vh,720px)] flex-1 space-y-4 overflow-y-auto p-4">
           {messages.length === 0 ? (
             <p className="text-sm text-shell-muted">
-              Ask a question about your uploaded documents. The assistant retrieves relevant chunks
-              and answers with explicit uncertainty when evidence is weak.
+              Ask for help with a case or your knowledge base. The assistant decides when to search
+              documents or load case context; you will see each tool result for transparency.
             </p>
           ) : null}
 
@@ -289,16 +366,98 @@ export function CopilotPanel() {
                 )}
               </div>
 
+              {m.role === "assistant" && (m.toolCalls?.length ?? 0) > 0 ? (
+                <div className="w-full max-w-[95%] rounded-md border border-zinc-700/80 bg-zinc-900/40 p-3 text-xs md:max-w-[85%]">
+                  <p className="font-medium text-zinc-300">Tool execution</p>
+                  <p className="mt-0.5 text-[11px] text-zinc-500">
+                    Arguments and raw results as returned by the backend (validated before use).
+                  </p>
+                  <ul className="mt-2 space-y-3">
+                    {(m.toolCalls ?? []).map((t, idx) => (
+                      <li key={`${t.call_id ?? idx}-${idx}`} className="rounded border border-zinc-800 bg-shell-bg/50 p-2">
+                        <p className="font-mono text-[11px] text-emerald-300/90">
+                          {t.name ?? "tool"}
+                          {t.call_id ? (
+                            <span className="text-zinc-500"> · {t.call_id.slice(0, 10)}…</span>
+                          ) : null}
+                        </p>
+                        {t.arguments ? (
+                          <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words text-[11px] text-zinc-400">
+                            {t.arguments}
+                          </pre>
+                        ) : null}
+                        <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words text-[11px] text-zinc-300">
+                          {typeof t.result === "string"
+                            ? t.result
+                            : JSON.stringify(t.result, null, 2)}
+                        </pre>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              {m.role === "assistant" && m.structured ? (
+                <div className="w-full max-w-[95%] space-y-2 rounded-md border border-indigo-900/50 bg-indigo-950/25 p-3 text-xs md:max-w-[85%]">
+                  <p className="font-medium text-indigo-200/90">Structured output</p>
+                  {m.structured.escalation ? (
+                    <div className="rounded border border-indigo-900/40 bg-shell-bg/40 p-2">
+                      <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                        Escalation
+                      </p>
+                      <p className="mt-1 text-[11px] text-indigo-100/90">
+                        <span className="font-mono">{m.structured.escalation.level}</span>
+                        {m.structured.escalation.rationale ? (
+                          <span className="text-zinc-400"> — {m.structured.escalation.rationale}</span>
+                        ) : null}
+                      </p>
+                    </div>
+                  ) : null}
+                  {m.structured.action_items && m.structured.action_items.length > 0 ? (
+                    <div>
+                      <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                        Action items
+                      </p>
+                      <ul className="mt-1 list-disc space-y-1 pl-4 text-zinc-300">
+                        {m.structured.action_items.map((it, i) => (
+                          <li key={`${it.title}-${i}`}>
+                            <span className="font-medium text-zinc-200">{it.title}</span>
+                            {it.priority ? (
+                              <span className="ml-2 text-[10px] uppercase text-zinc-500">
+                                {it.priority}
+                              </span>
+                            ) : null}
+                            {it.owner ? (
+                              <span className="ml-2 text-zinc-500">@{it.owner}</span>
+                            ) : null}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  {m.structured.support_reply_draft ? (
+                    <div>
+                      <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                        Support reply draft
+                      </p>
+                      <p className="mt-1 whitespace-pre-wrap text-zinc-300">
+                        {m.structured.support_reply_draft}
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
               {m.role === "assistant" &&
               m.sources &&
               m.sources.length > 0 &&
               m.content.length > 0 ? (
                 <div className="w-full max-w-[95%] rounded-md border border-dashed border-shell-border bg-shell-panel/30 p-3 text-xs md:max-w-[85%]">
-                  <p className="font-medium text-zinc-300">Sources (retrieved)</p>
+                  <p className="font-medium text-zinc-300">Sources (from search_documents)</p>
                   {m.weakEvidence ? (
                     <p className="mt-1 text-amber-200/90">
-                      Low confidence: best match score is below the configured threshold. Treat the
-                      answer as tentative.
+                      Low confidence: retrieval runs were marked weak or empty. Treat the answer as
+                      tentative.
                     </p>
                   ) : null}
                   <ul className="mt-2 space-y-2">

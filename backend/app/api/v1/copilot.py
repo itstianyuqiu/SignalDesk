@@ -19,6 +19,8 @@ from app.schemas.copilot import (
     CopilotMessageOut,
     CopilotSessionOut,
     SourceChunk,
+    SupportStructuredOut,
+    ToolCallRecordOut,
 )
 from app.services.copilot.orchestrator import CopilotTurnResult, run_copilot_turn, stream_copilot_turn
 
@@ -26,6 +28,18 @@ router = APIRouter(prefix="/copilot", tags=["copilot"])
 
 
 def _to_response(result: CopilotTurnResult) -> CopilotChatResponse:
+    structured: SupportStructuredOut | None = None
+    if result.structured:
+        structured = SupportStructuredOut.model_validate(result.structured)
+    tool_trace = [
+        ToolCallRecordOut(
+            name=s.get("name"),
+            call_id=s.get("call_id"),
+            arguments=s.get("arguments"),
+            result=s.get("result") if isinstance(s.get("result"), dict) else None,
+        )
+        for s in result.tool_trace
+    ]
     return CopilotChatResponse(
         session_id=result.session_id,
         user_message_id=result.user_message_id,
@@ -42,6 +56,8 @@ def _to_response(result: CopilotTurnResult) -> CopilotChatResponse:
             for s in result.sources
         ],
         weak_evidence=result.weak_evidence,
+        structured=structured,
+        tool_trace=tool_trace,
     )
 
 

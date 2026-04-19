@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -20,6 +21,27 @@ class CopilotChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=12000)
 
 
+class EscalationOut(BaseModel):
+    level: str = "none"
+    rationale: str = ""
+
+
+class SupportStructuredOut(BaseModel):
+    """Structured support intelligence (Phase 4)."""
+
+    answer: str
+    action_items: list[dict[str, Any]] = Field(default_factory=list)
+    escalation: EscalationOut = Field(default_factory=EscalationOut)
+    support_reply_draft: str | None = None
+
+
+class ToolCallRecordOut(BaseModel):
+    name: str | None = None
+    call_id: str | None = None
+    arguments: str | None = None
+    result: dict[str, Any] | None = None
+
+
 class CopilotChatResponse(BaseModel):
     session_id: UUID
     user_message_id: UUID
@@ -29,6 +51,11 @@ class CopilotChatResponse(BaseModel):
     weak_evidence: bool = Field(
         description="True when retrieval is empty or scores are below the configured threshold.",
     )
+    structured: SupportStructuredOut | None = Field(
+        default=None,
+        description="Validated support summary (action items, escalation, draft reply).",
+    )
+    tool_trace: list[ToolCallRecordOut] = Field(default_factory=list)
 
 
 class CopilotSessionOut(BaseModel):

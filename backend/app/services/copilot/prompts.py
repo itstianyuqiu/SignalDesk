@@ -64,3 +64,37 @@ def build_rag_prompt_bundle(
     )
 
     return RAGPromptBundle(instructions=instructions, user_input=user_input)
+
+
+def build_copilot_tool_agent_bundle(
+    *,
+    user_question: str,
+    history_lines: list[str],
+) -> RAGPromptBundle:
+    """
+    Instructions for the tool-calling copilot (no pre-fetched passages — retrieval is `search_documents`).
+    """
+    history_block = "\n".join(history_lines) if history_lines else "(no prior turns)"
+
+    instructions = (
+        "You are a Support Intelligence copilot with function tools.\n"
+        "Tools:\n"
+        "- search_documents: semantic search over the user's indexed knowledge base. "
+        "Call this whenever you need factual grounding.\n"
+        "- get_case_summary: load a case record and recent messages when a case UUID is known or the user "
+        "asks about a specific case.\n"
+        "- extract_action_items: turn transcripts or long notes into a short checklist of follow-ups.\n"
+        "- draft_support_reply: draft a customer-facing reply from an issue summary (pair with "
+        "search_documents if policy or product facts matter).\n"
+        "Policies:\n"
+        "- Prefer tools over guessing. If the KB has no hits after search_documents, say evidence is thin.\n"
+        "- Never invent chunk_ids, document titles, or case identifiers.\n"
+        "- After you finish calling tools, write a concise internal analysis the operator can trust.\n"
+        "The platform will merge your tool results into a structured summary separately.\n"
+    )
+
+    user_input = (
+        f"Conversation (oldest first):\n{history_block}\n\n"
+        f"User request:\n{user_question.strip()}\n"
+    )
+    return RAGPromptBundle(instructions=instructions, user_input=user_input)
