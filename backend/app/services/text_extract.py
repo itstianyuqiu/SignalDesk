@@ -45,7 +45,10 @@ def _decode_plain(content: bytes) -> str:
 
 
 def _extract_pdf(content: bytes) -> str:
-    reader = PdfReader(BytesIO(content))
+    try:
+        reader = PdfReader(BytesIO(content))
+    except Exception as exc:
+        raise ValueError(f"Could not open PDF: {exc}") from exc
     parts: list[str] = []
     for page in reader.pages:
         try:

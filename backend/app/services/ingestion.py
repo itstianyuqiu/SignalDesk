@@ -8,6 +8,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.db.pgvector_codec import ensure_pgvector_registered
 from app.models.document import Document, DocumentChunk, DocumentVersion
 from app.services.chunking import chunk_text
 from app.services.embeddings import embed_texts
@@ -34,6 +35,8 @@ async def ingest_bytes(
     source_type: str,
     settings: Settings,
 ) -> IngestionResult:
+    await ensure_pgvector_registered(session)
+
     try:
         text, kind = extract_text(content=raw_bytes, filename=filename, content_type=content_type)
     except UnsupportedContentTypeError:

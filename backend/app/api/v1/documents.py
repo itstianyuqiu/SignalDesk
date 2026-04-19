@@ -1,9 +1,13 @@
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from openai import APIError
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.deps import CurrentUserId, DbSession
+from app.api.openai_errors import raise_http_from_openai
 from app.core.config import Settings, get_settings
 from app.models.document import Document
 from app.schemas.common import ListMeta
@@ -12,6 +16,7 @@ from app.services.ingestion import ingest_bytes
 from app.services.text_extract import UnsupportedContentTypeError
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+_log = logging.getLogger(__name__)
 
 
 def _parse_tags(raw: str | None) -> list[str]:
@@ -95,12 +100,29 @@ async def ingest_document(
             source_type=source_type,
             settings=settings,
         )
+    except APIError as exc:
+        raise_http_from_openai(exc)
     except UnsupportedContentTypeError as exc:
         raise HTTPException(status_code=415, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SQLAlchemyError as exc:
+        _log.exception("ingest failed during database commit")
+        base = (
+            "Database error while saving document chunks. "
+            "Confirm `002_pgvector_rag.sql` is applied (vector extension + embedding column). "
+            "If you use Supabase pooler port 6543, ensure asyncpg uses statement_cache_size=0 (set automatically for pooler URLs)."
+        )
+        if settings.environment == "local":
+            base = f"{base} Postgres: {exc}"
+        elif "row-level security" in str(exc).lower() or "rls" in str(exc).lower():
+            base = (
+                f"{base} RLS blocked this write: connect with a DB role that bypasses RLS for server-side jobs "
+                "(see Supabase database password / direct connection), or adjust policies."
+            )
+        raise HTTPException(status_code=503, detail=base) from exc
 
     return IngestResponse(
         document_id=result.document_id,

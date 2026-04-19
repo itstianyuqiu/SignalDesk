@@ -4,6 +4,22 @@ import { useCallback, useEffect, useState } from "react";
 
 import { apiFetch } from "@/lib/api-auth";
 
+async function readApiErrorMessage(res: Response): Promise<string> {
+  const text = await res.text();
+  let msg = text || `HTTP ${res.status}`;
+  try {
+    const parsed = JSON.parse(text) as { detail?: unknown };
+    if (typeof parsed.detail === "string") {
+      msg = parsed.detail;
+    } else if (Array.isArray(parsed.detail)) {
+      msg = parsed.detail.map((d) => JSON.stringify(d)).join("; ");
+    }
+  } catch {
+    /* keep raw text */
+  }
+  return msg;
+}
+
 type DocumentRow = {
   id: string;
   title: string;
@@ -30,8 +46,7 @@ export function DocumentsPanel() {
     try {
       const res = await apiFetch("/api/v1/documents?limit=50");
       if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `HTTP ${res.status}`);
+        throw new Error(await readApiErrorMessage(res));
       }
       const data = (await res.json()) as { items: DocumentRow[] };
       setItems(data.items ?? []);
@@ -66,8 +81,7 @@ export function DocumentsPanel() {
         body: form,
       });
       if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `HTTP ${res.status}`);
+        throw new Error(await readApiErrorMessage(res));
       }
       const data = (await res.json()) as { chunk_count: number };
       setUploadMessage(`Ingested: ${data.chunk_count} chunk(s).`);

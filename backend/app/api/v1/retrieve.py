@@ -1,8 +1,10 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
+from openai import APIError
 
 from app.api.deps import CurrentUserId, DbSession
+from app.api.openai_errors import raise_http_from_openai
 from app.core.config import Settings, get_settings
 from app.schemas.retrieve import RetrievedChunkOut, RetrieveRequest, RetrieveResponse
 from app.services.retrieval import retrieve_chunks
@@ -34,6 +36,8 @@ async def retrieve(
             tags=filters.tags if filters else None,
             source_types=filters.source_types if filters else None,
         )
+    except APIError as exc:
+        raise_http_from_openai(exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:

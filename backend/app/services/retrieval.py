@@ -3,10 +3,12 @@
 from dataclasses import dataclass
 from uuid import UUID
 
+from pgvector import Vector as PGVector
 from sqlalchemy import Select, and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.db.pgvector_codec import ensure_pgvector_registered
 from app.models.document import Document, DocumentChunk, DocumentVersion
 from app.services.embeddings import embed_texts
 
@@ -45,8 +47,10 @@ async def retrieve_chunks(
     if not query.strip():
         raise ValueError("Query must not be empty.")
 
+    await ensure_pgvector_registered(session)
+
     query_vectors = await embed_texts([query.strip()], settings=settings)
-    query_vector = query_vectors[0]
+    query_vector = PGVector(query_vectors[0])
 
     distance_expr = DocumentChunk.embedding.cosine_distance(query_vector)  # type: ignore[union-attr]
 

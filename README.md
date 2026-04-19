@@ -113,7 +113,7 @@ Interactive docs: [http://localhost:8000/docs](http://localhost:8000/docs)
 
 ## 5. Optional: Docker Postgres
 
-`docker compose up -d` starts a local Postgres for experiments. The migration file targets **Supabase** (`auth.users`); it is not intended for the plain Docker database unless you add a compatible auth schema.
+`docker compose up -d` starts a local Postgres for experiments (default **host port 5433 → container 5432**, so it does not clash with a local PostgreSQL on :5432). Set `backend/.env` `DATABASE_URL` to use that port. The migration file targets **Supabase** (`auth.users`); it is not intended for the plain Docker database unless you add a compatible auth schema.
 
 ## Scripts
 

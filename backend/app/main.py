@@ -1,11 +1,21 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+import logging
 
-import app.models.document  # noqa: F401  # Register ORM mappers
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+import app.models.case  # noqa: F401  # FK targets before chat/document
+import app.models.user  # noqa: F401
+import app.models.chat  # noqa: F401  # Register ORM mappers
+import app.models.document  # noqa: F401
 
 from app.api.v1.health import router as health_router
 from app.api.v1.router import api_router as api_v1_router
 from app.core.config import get_settings
+
+_log = logging.getLogger("app.main")
 
 
 def create_app() -> FastAPI:
@@ -23,6 +33,21 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @application.middleware("http")
+    async def unhandled_exception_middleware(request: Request, call_next):
+        try:
+            return await call_next(request)
+        except StarletteHTTPException:
+            raise
+        except RequestValidationError:
+            raise
+        except Exception as exc:
+            _log.exception("%s %s", request.method, request.url.path)
+            return JSONResponse(
+                status_code=500,
+                content={"detail": f"{type(exc).__name__}: {exc}"},
+            )
 
     # Root health for load balancers / probes (no version prefix).
     application.include_router(health_router)

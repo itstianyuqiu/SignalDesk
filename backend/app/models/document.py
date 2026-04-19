@@ -2,14 +2,24 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func, text
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID as PGUUID
+from sqlalchemy import DateTime, ForeignKey, Integer, Text, func, text
+from sqlalchemy.dialects.postgresql import ARRAY, ENUM as PG_ENUM, JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.db.vector_type import VECTOR
 
 VECTOR_DIM = 1536  # Must match database/migrations/002_pgvector_rag.sql
+
+# Matches database/migrations/001_initial_schema.sql (create type public.document_status ...)
+DOCUMENT_STATUS = PG_ENUM(
+    "draft",
+    "published",
+    "archived",
+    name="document_status",
+    schema="public",
+    create_type=False,
+)
 
 
 class Document(Base):
@@ -23,7 +33,11 @@ class Document(Base):
     )
     owner_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("public.users.id"), nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
+    status: Mapped[str] = mapped_column(
+        DOCUMENT_STATUS,
+        nullable=False,
+        server_default=text("'draft'::public.document_status"),
+    )
     current_version_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("public.document_versions.id", ondelete="SET NULL"),
@@ -100,6 +114,6 @@ class DocumentChunk(Base):
         server_default=text("'{}'::jsonb"),
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(VECTOR_DIM), nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(VECTOR(VECTOR_DIM), nullable=True)
 
     document_version: Mapped["DocumentVersion"] = relationship("DocumentVersion", back_populates="chunks")
