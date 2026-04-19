@@ -14,23 +14,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.models.chat import ChatMessage, ChatSession
-from app.services.copilot.openai_responses import (
-    run_tool_agent_loop,
-    synthesize_support_intelligence,
-)
-from app.services.copilot.prompts import build_copilot_tool_agent_bundle
 from app.services.copilot.tools.context import ToolContext
+from app.services.copilot.trace_context import (
+    SourceOut,
+    aggregate_sources_from_tool_trace,
+    weak_evidence_from_tool_trace,
+)
+from app.services.copilot.workflow.graph import (
+    run_postprocess_pipeline,
+    run_support_intelligence_workflow,
+    workflow_result_from_state,
+)
+from app.services.copilot.workflow.nodes import execute_tool_agent_phase, prepare_context
+from app.services.copilot.workflow.state import CopilotWorkflowState
 from app.services.observability.turn_metrics import CopilotTurnMetrics
 from app.services.observability.turn_observability import build_observability_metadata
-
-
-@dataclass(frozen=True)
-class SourceOut:
-    chunk_id: UUID
-    document_id: UUID
-    title: str
-    score: float
-    excerpt: str
 
 
 @dataclass(frozen=True)
@@ -56,51 +54,6 @@ def _serialize_sources(sources: list[SourceOut]) -> list[dict]:
         }
         for s in sources
     ]
-
-
-def _aggregate_sources_from_tool_trace(tool_trace: list[dict[str, Any]]) -> list[SourceOut]:
-    """Merge `search_documents` hits (retrieval layer — surfaced via tool results only)."""
-    best: dict[UUID, SourceOut] = {}
-    for step in tool_trace:
-        if step.get("name") != "search_documents":
-            continue
-        res = step.get("result")
-        if not isinstance(res, dict) or not res.get("ok"):
-            continue
-        for h in res.get("hits") or []:
-            if not isinstance(h, dict):
-                continue
-            try:
-                cid = UUID(str(h.get("chunk_id")))
-                doc_id = UUID(str(h.get("document_id")))
-            except (TypeError, ValueError):
-                continue
-            sc = float(h.get("score", 0.0))
-            excerpt = str(h.get("excerpt", ""))
-            title = str(h.get("title", ""))
-            prev = best.get(cid)
-            if prev is None or sc > prev.score:
-                best[cid] = SourceOut(
-                    chunk_id=cid,
-                    document_id=doc_id,
-                    title=title,
-                    score=sc,
-                    excerpt=excerpt,
-                )
-    return sorted(best.values(), key=lambda s: (-s.score, str(s.chunk_id)))
-
-
-def _weak_evidence_from_tool_trace(tool_trace: list[dict[str, Any]]) -> bool:
-    searches = [
-        s["result"]
-        for s in tool_trace
-        if s.get("name") == "search_documents"
-        and isinstance(s.get("result"), dict)
-        and s["result"].get("ok") is True
-    ]
-    if not searches:
-        return True
-    return all(s.get("weak_evidence", True) for s in searches)
 
 
 async def _next_message_position(session: AsyncSession, session_id: UUID) -> int:
@@ -199,10 +152,6 @@ async def run_copilot_turn(
     history_msgs.append(user_row)
     history_lines = _history_lines(history_msgs)
 
-    bundle = build_copilot_tool_agent_bundle(
-        user_question=text,
-        history_lines=history_lines,
-    )
     metrics = CopilotTurnMetrics()
     tool_ctx = ToolContext(
         db=session,
@@ -212,32 +161,22 @@ async def run_copilot_turn(
         metrics=metrics,
     )
 
-    t_agent = time.perf_counter()
-    agent = await run_tool_agent_loop(
-        api_key=settings.openai_api_key,
-        model=settings.copilot_model,
-        instructions=bundle.instructions,
-        user_input=bundle.user_input,
-        ctx=tool_ctx,
-    )
-    agent_loop_ms = (time.perf_counter() - t_agent) * 1000.0
-
-    t_syn = time.perf_counter()
-    structured = await synthesize_support_intelligence(
-        api_key=settings.openai_api_key,
-        model=settings.copilot_model,
+    wf = await run_support_intelligence_workflow(
         user_question=text,
-        interim_assistant_text=agent.interim_assistant_text,
-        tool_trace=agent.tool_trace,
+        history_lines=history_lines,
+        api_key=settings.openai_api_key,
+        model=settings.copilot_model,
+        tool_ctx=tool_ctx,
     )
-    synthesis_ms = (time.perf_counter() - t_syn) * 1000.0
+    agent_loop_ms = wf.agent_loop_ms
+    synthesis_ms = wf.synthesis_ms
 
-    answer = structured.answer.strip() or (
+    answer = wf.final_answer.strip() or (
         "I could not generate a response. Please try again or check API configuration."
     )
-    sources = _aggregate_sources_from_tool_trace(agent.tool_trace)
-    weak = _weak_evidence_from_tool_trace(agent.tool_trace)
-    structured_dict = structured.model_dump()
+    sources = aggregate_sources_from_tool_trace(wf.tool_trace)
+    weak = wf.weak_evidence
+    structured_dict = wf.structured
     total_wall_ms = (time.perf_counter() - turn_t0) * 1000.0
     observability = build_observability_metadata(
         settings=settings,
@@ -245,7 +184,7 @@ async def run_copilot_turn(
         agent_loop_ms=agent_loop_ms,
         synthesis_ms=synthesis_ms,
         total_wall_ms=total_wall_ms,
-        tool_trace=agent.tool_trace,
+        tool_trace=wf.tool_trace,
         weak_evidence=weak,
     )
 
@@ -261,8 +200,14 @@ async def run_copilot_turn(
             "model": settings.copilot_model,
             "kind": "copilot_tools",
             "structured": structured_dict,
-            "tools": agent.tool_trace,
-            "interim_assistant_text": agent.interim_assistant_text,
+            "tools": wf.tool_trace,
+            "interim_assistant_text": wf.interim_assistant_text,
+            "workflow": {
+                "selected_tools": wf.selected_tools,
+                "confidence_hint": wf.confidence_hint,
+                "retrieved_context": wf.retrieved_context,
+                "agent_node_errors": wf.agent_node_errors,
+            },
             "observability": observability,
         },
     )
@@ -284,7 +229,7 @@ async def run_copilot_turn(
         sources=sources,
         weak_evidence=weak,
         structured=structured_dict,
-        tool_trace=agent.tool_trace,
+        tool_trace=wf.tool_trace,
     )
 
 
@@ -342,10 +287,6 @@ async def stream_copilot_turn(
     history_msgs.append(user_row)
     history_lines = _history_lines(history_msgs)
 
-    bundle = build_copilot_tool_agent_bundle(
-        user_question=text,
-        history_lines=history_lines,
-    )
     metrics = CopilotTurnMetrics()
     tool_ctx = ToolContext(
         db=session,
@@ -355,17 +296,19 @@ async def stream_copilot_turn(
         metrics=metrics,
     )
 
-    t_agent = time.perf_counter()
-    agent = await run_tool_agent_loop(
-        api_key=settings.openai_api_key,
-        model=settings.copilot_model,
-        instructions=bundle.instructions,
-        user_input=bundle.user_input,
-        ctx=tool_ctx,
-    )
-    agent_loop_ms = (time.perf_counter() - t_agent) * 1000.0
+    # Same graph semantics as `run_support_intelligence_workflow`, but yield tool events before synthesis.
+    base: CopilotWorkflowState = {
+        "user_question": text,
+        "history_lines": history_lines,
+        "api_key": settings.openai_api_key,
+        "model": settings.copilot_model,
+    }
+    after_prep: CopilotWorkflowState = {**base, **prepare_context(base)}
+    tool_updates = await execute_tool_agent_phase(after_prep, tool_ctx)
+    agent_loop_ms = float(tool_updates.get("agent_loop_ms") or 0.0)
+    after_agent: CopilotWorkflowState = {**after_prep, **tool_updates}
 
-    for step in agent.tool_trace:
+    for step in after_agent.get("tool_trace") or []:
         yield {
             "event": "tool",
             "name": step.get("name"),
@@ -374,22 +317,16 @@ async def stream_copilot_turn(
             "result": step.get("result"),
         }
 
-    t_syn = time.perf_counter()
-    structured = await synthesize_support_intelligence(
-        api_key=settings.openai_api_key,
-        model=settings.copilot_model,
-        user_question=text,
-        interim_assistant_text=agent.interim_assistant_text,
-        tool_trace=agent.tool_trace,
-    )
-    synthesis_ms = (time.perf_counter() - t_syn) * 1000.0
+    final_state = await run_postprocess_pipeline(after_agent)
+    wf = workflow_result_from_state(final_state)
+    synthesis_ms = wf.synthesis_ms
 
-    answer = structured.answer.strip() or (
+    answer = wf.final_answer.strip() or (
         "I could not generate a streamed response. Please try again."
     )
-    sources = _aggregate_sources_from_tool_trace(agent.tool_trace)
-    weak = _weak_evidence_from_tool_trace(agent.tool_trace)
-    structured_dict = structured.model_dump()
+    sources = aggregate_sources_from_tool_trace(wf.tool_trace)
+    weak = wf.weak_evidence
+    structured_dict = wf.structured
     total_wall_ms = (time.perf_counter() - turn_t0) * 1000.0
     observability = build_observability_metadata(
         settings=settings,
@@ -397,7 +334,7 @@ async def stream_copilot_turn(
         agent_loop_ms=agent_loop_ms,
         synthesis_ms=synthesis_ms,
         total_wall_ms=total_wall_ms,
-        tool_trace=agent.tool_trace,
+        tool_trace=wf.tool_trace,
         weak_evidence=weak,
     )
 
@@ -421,8 +358,14 @@ async def stream_copilot_turn(
             "model": settings.copilot_model,
             "kind": "copilot_tools_stream",
             "structured": structured_dict,
-            "tools": agent.tool_trace,
-            "interim_assistant_text": agent.interim_assistant_text,
+            "tools": wf.tool_trace,
+            "interim_assistant_text": wf.interim_assistant_text,
+            "workflow": {
+                "selected_tools": wf.selected_tools,
+                "confidence_hint": wf.confidence_hint,
+                "retrieved_context": wf.retrieved_context,
+                "agent_node_errors": wf.agent_node_errors,
+            },
             "observability": observability,
         },
     )
@@ -441,5 +384,5 @@ async def stream_copilot_turn(
         "assistant_message_id": str(assistant_row.id),
         "answer": answer,
         "structured": structured_dict,
-        "tool_trace": agent.tool_trace,
+        "tool_trace": wf.tool_trace,
     }
