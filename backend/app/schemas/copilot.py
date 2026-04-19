@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -19,6 +19,35 @@ class CopilotChatRequest(BaseModel):
         description="Existing copilot session; omit to start a new session.",
     )
     message: str = Field(min_length=1, max_length=12000)
+    input_mode: Literal["text", "voice"] = Field(
+        default="text",
+        description="When voice, user message metadata records STT and session transcript rollup.",
+    )
+    voice: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional STT metadata (mime_type, duration_sec, engine, etc.).",
+    )
+
+
+class TranscribeResponse(BaseModel):
+    text: str
+    model: str = "whisper-1"
+
+
+class SessionInsightsOut(BaseModel):
+    summary: str
+    action_items: list[str] = Field(default_factory=list)
+    case_tags: list[str] = Field(default_factory=list)
+    generated_at: str
+    model: str | None = None
+
+
+class CopilotSessionDetailOut(BaseModel):
+    id: UUID
+    title: str | None
+    metadata: dict = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
 
 
 class EscalationOut(BaseModel):

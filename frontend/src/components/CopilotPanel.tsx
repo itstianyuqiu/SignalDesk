@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "@/lib/api-auth";
+import { useVoiceCapture } from "@/hooks/useVoiceCapture";
 
 type SourceChunk = {
   chunk_id: string;
@@ -40,6 +41,20 @@ type UiMessage = {
   structured?: StructuredSupport | null;
 };
 
+type SessionInsights = {
+  summary: string;
+  action_items: string[];
+  case_tags: string[];
+  generated_at: string;
+  model?: string | null;
+};
+
+type VoiceMeta = {
+  mime_type: string;
+  duration_sec: number;
+  engine: string;
+};
+
 const SESSION_KEY = "signaldesk_copilot_session_id";
 
 function parseSseBlocks(buffer: string): { events: unknown[]; rest: string } {
@@ -68,8 +83,15 @@ export function CopilotPanel() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sessionInsights, setSessionInsights] = useState<SessionInsights | null>(null);
+  const [pendingVoiceMeta, setPendingVoiceMeta] = useState<VoiceMeta | null>(null);
+  /** Whisper language hint: English UI often sets `navigator.language` to en-* even when you speak Chinese. */
+  const [speechLanguage, setSpeechLanguage] = useState<"auto" | "zh" | "en">("auto");
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const lastSendWasVoiceRef = useRef(false);
+  const voice = useVoiceCapture();
 
   const scrollToBottom = () => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -80,13 +102,22 @@ export function CopilotPanel() {
   }, [messages, streaming]);
 
   const loadHistory = useCallback(async (sid: string) => {
-    const res = await apiFetch(`/api/v1/copilot/sessions/${sid}/messages`);
-    if (!res.ok) {
+    const [msgRes, sessRes] = await Promise.all([
+      apiFetch(`/api/v1/copilot/sessions/${sid}/messages`),
+      apiFetch(`/api/v1/copilot/sessions/${sid}`),
+    ]);
+    if (!msgRes.ok) {
       setSessionId(null);
       localStorage.removeItem(SESSION_KEY);
       return;
     }
-    const rows = (await res.json()) as Array<{
+    if (sessRes.ok) {
+      const detail = (await sessRes.json()) as {
+        metadata?: { session_insights?: SessionInsights };
+      };
+      setSessionInsights(detail.metadata?.session_insights ?? null);
+    }
+    const rows = (await msgRes.json()) as Array<{
       id: string;
       role: string;
       content: string;
@@ -127,14 +158,91 @@ export function CopilotPanel() {
     setSessionId(null);
     setMessages([]);
     setError(null);
+    setSessionInsights(null);
+    setPendingVoiceMeta(null);
+    setSpeechLanguage("auto");
+  };
+
+  const toggleVoiceCapture = async () => {
+    setError(null);
+    if (voice.status === "recording") {
+      setTranscribing(true);
+      try {
+        const result = await voice.stopRecording();
+        if (!result) {
+          setTranscribing(false);
+          return;
+        }
+        if (result.durationSec < 0.45) {
+          setError(
+            "Recording was too short. Hold Mic, speak a full sentence, then tap Stop.",
+          );
+          setTranscribing(false);
+          return;
+        }
+        if (result.blob.size < 400) {
+          setError("No usable audio captured. Check the microphone and try again.");
+          setTranscribing(false);
+          return;
+        }
+        // Near-silent clips cause Whisper to "hallucinate" stock subtitle lines (e.g. Amara.org).
+        if (result.peakLevel >= 0 && result.peakLevel < 0.014) {
+          setError(
+            "Input level is too low (almost silent), so transcription may be wrong. In Windows: Settings → System → Sound, raise the input volume, pick the correct microphone, speak closer to it, and record 2–5 seconds.",
+          );
+          setTranscribing(false);
+          return;
+        }
+        const fd = new FormData();
+        fd.append("file", result.blob, "recording.webm");
+        const langHint =
+          speechLanguage === "auto"
+            ? typeof navigator !== "undefined" && navigator.language
+              ? navigator.language
+              : ""
+            : speechLanguage === "zh"
+              ? "zh-CN"
+              : "en-US";
+        if (langHint) {
+          fd.append("language", langHint);
+        }
+        const res = await apiFetch("/api/v1/copilot/voice/transcribe", {
+          method: "POST",
+          body: fd,
+        });
+        if (!res.ok) {
+          const detail = await res.text();
+          setError(detail || `Transcription failed (${res.status})`);
+          setTranscribing(false);
+          return;
+        }
+        const data = (await res.json()) as { text: string };
+        setInput(data.text);
+        setPendingVoiceMeta({
+          mime_type: result.mimeType,
+          duration_sec: result.durationSec,
+          engine: "whisper-1",
+        });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Transcription failed");
+      } finally {
+        setTranscribing(false);
+      }
+      return;
+    }
+    await voice.startRecording();
   };
 
   const sendMessage = async () => {
     const text = input.trim();
-    if (!text || loading || streaming) return;
+    if (!text || loading || streaming || transcribing) return;
 
     setError(null);
+    const voiceMeta = pendingVoiceMeta;
+    const useVoiceTurn = voiceMeta !== null;
+    lastSendWasVoiceRef.current = useVoiceTurn;
     setInput("");
+    setPendingVoiceMeta(null);
     setLoading(true);
     setStreaming(true);
 
@@ -165,10 +273,19 @@ export function CopilotPanel() {
       body: JSON.stringify({
         message: text,
         session_id: sessionId,
+        input_mode: useVoiceTurn ? "voice" : "text",
+        voice: useVoiceTurn
+          ? {
+              mime_type: voiceMeta.mime_type,
+              duration_sec: voiceMeta.duration_sec,
+              engine: voiceMeta.engine,
+            }
+          : undefined,
       }),
     });
 
     if (!res.ok) {
+      lastSendWasVoiceRef.current = false;
       const detail = await res.text();
       setError(detail || `Request failed (${res.status})`);
       setMessages((prev) => prev.filter((m) => m.id !== assistantId));
@@ -179,6 +296,7 @@ export function CopilotPanel() {
 
     const reader = res.body?.getReader();
     if (!reader) {
+      lastSendWasVoiceRef.current = false;
       setError("No response stream.");
       setMessages((prev) => prev.filter((m) => m.id !== assistantId));
       setLoading(false);
@@ -203,6 +321,7 @@ export function CopilotPanel() {
           if (!ev || typeof ev !== "object") continue;
           const e = ev as Record<string, unknown>;
           if (e.event === "error") {
+            lastSendWasVoiceRef.current = false;
             setError(String(e.detail ?? "Stream error"));
             continue;
           }
@@ -269,6 +388,18 @@ export function CopilotPanel() {
                 return next;
               }),
             );
+            if (lastSendWasVoiceRef.current) {
+              lastSendWasVoiceRef.current = false;
+              void (async () => {
+                const insRes = await apiFetch(`/api/v1/copilot/sessions/${sid}/insights`, {
+                  method: "POST",
+                });
+                if (insRes.ok) {
+                  const ins = (await insRes.json()) as SessionInsights;
+                  setSessionInsights(ins);
+                }
+              })();
+            }
           }
         }
       }
@@ -278,8 +409,9 @@ export function CopilotPanel() {
           const raw = tail.slice(5).trim();
           const ev = JSON.parse(raw) as Record<string, unknown>;
           if (ev.event === "done" && typeof ev.session_id === "string") {
-            setSessionId(ev.session_id);
-            localStorage.setItem(SESSION_KEY, ev.session_id);
+            const sidTail = ev.session_id;
+            setSessionId(sidTail);
+            localStorage.setItem(SESSION_KEY, sidTail);
             const tailText = typeof ev.answer === "string" ? ev.answer : "";
             const tailStructured =
               ev.structured && typeof ev.structured === "object"
@@ -304,12 +436,25 @@ export function CopilotPanel() {
                 return next;
               }),
             );
+            if (lastSendWasVoiceRef.current) {
+              lastSendWasVoiceRef.current = false;
+              void (async () => {
+                const insRes = await apiFetch(`/api/v1/copilot/sessions/${sidTail}/insights`, {
+                  method: "POST",
+                });
+                if (insRes.ok) {
+                  const ins = (await insRes.json()) as SessionInsights;
+                  setSessionInsights(ins);
+                }
+              })();
+            }
           }
         } catch {
           /* ignore */
         }
       }
     } catch (err) {
+      lastSendWasVoiceRef.current = false;
       setError(err instanceof Error ? err.message : "Stream interrupted");
     } finally {
       setStreaming(false);
@@ -321,7 +466,9 @@ export function CopilotPanel() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm text-shell-muted">
           The copilot calls tools (document search, case summary, action items, reply drafts) and
-          returns a structured support summary. Tool results are shown below each answer.
+          returns a structured support summary. Tool results are shown below each answer. Voice uses
+          your microphone, server-side Whisper transcription, then the same copilot workflow as
+          typed messages.
         </p>
         <button
           type="button"
@@ -335,6 +482,43 @@ export function CopilotPanel() {
       {error ? (
         <div className="rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-200">
           {error}
+        </div>
+      ) : null}
+
+      {voice.error ? (
+        <div className="rounded-md border border-amber-900/50 bg-amber-950/30 px-3 py-2 text-xs text-amber-100">
+          {voice.error}
+        </div>
+      ) : null}
+
+      {sessionInsights ? (
+        <div className="rounded-lg border border-emerald-900/50 bg-emerald-950/20 p-4 text-sm text-zinc-200">
+          <p className="font-medium text-emerald-200/90">Session summary</p>
+          <p className="mt-1 whitespace-pre-wrap text-zinc-300">{sessionInsights.summary}</p>
+          {sessionInsights.action_items.length > 0 ? (
+            <div className="mt-3">
+              <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                Action items
+              </p>
+              <ul className="mt-1 list-disc space-y-0.5 pl-4 text-zinc-300">
+                {sessionInsights.action_items.map((it, i) => (
+                  <li key={`${it}-${i}`}>{it}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {sessionInsights.case_tags.length > 0 ? (
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {sessionInsights.case_tags.map((t) => (
+                <span
+                  key={t}
+                  className="rounded-full border border-emerald-900/40 bg-zinc-900/60 px-2 py-0.5 text-[11px] text-emerald-100/90"
+                >
+                  {t}
+                </span>
+              ))}
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -487,10 +671,40 @@ export function CopilotPanel() {
         </div>
 
         <div className="border-t border-shell-border p-3">
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+            <label htmlFor="speech-lang" className="shrink-0">
+              Transcription language
+            </label>
+            <select
+              id="speech-lang"
+              value={speechLanguage}
+              onChange={(e) =>
+                setSpeechLanguage(e.target.value as "auto" | "zh" | "en")
+              }
+              disabled={voice.status === "recording" || transcribing}
+              className="rounded border border-shell-border bg-shell-bg px-2 py-1 text-zinc-200"
+            >
+              <option value="auto">Auto (browser locale)</option>
+              <option value="zh">中文 (Chinese)</option>
+              <option value="en">English</option>
+            </select>
+            <span className="text-zinc-600">
+              If you speak Chinese but see wrong text, choose 中文.
+            </span>
+          </div>
+          {pendingVoiceMeta ? (
+            <p className="mb-2 text-xs text-emerald-200/85">
+              Voice transcript (Whisper) — edit if needed, then Send.
+            </p>
+          ) : null}
           <div className="flex gap-2">
             <textarea
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => {
+                const v = e.target.value;
+                setInput(v);
+                if (!v.trim()) setPendingVoiceMeta(null);
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -499,18 +713,45 @@ export function CopilotPanel() {
               }}
               rows={2}
               placeholder="Ask about your documents…"
-              disabled={loading || streaming}
+              disabled={loading || streaming || transcribing || voice.status === "recording"}
               className="min-h-[44px] flex-1 resize-y rounded-md border border-shell-border bg-shell-bg px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500 disabled:opacity-50"
             />
             <button
               type="button"
+              title={
+                voice.status === "recording"
+                  ? "Stop recording and transcribe"
+                  : "Record voice (browser mic → Whisper)"
+              }
+              onClick={() => void toggleVoiceCapture()}
+              disabled={
+                loading ||
+                streaming ||
+                transcribing ||
+                !voice.isSupported
+              }
+              className={`self-end rounded-md border px-3 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                voice.status === "recording"
+                  ? "border-red-600/80 bg-red-950/50 text-red-100 animate-pulse"
+                  : "border-shell-border text-zinc-200 hover:bg-zinc-800/60"
+              }`}
+            >
+              {transcribing ? "…" : voice.status === "recording" ? "Stop" : "Mic"}
+            </button>
+            <button
+              type="button"
               onClick={() => void sendMessage()}
-              disabled={loading || streaming || !input.trim()}
+              disabled={loading || streaming || transcribing || !input.trim()}
               className="self-end rounded-md bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900 transition-colors hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               {streaming ? "Streaming…" : loading ? "…" : "Send"}
             </button>
           </div>
+          {!voice.isSupported ? (
+            <p className="mt-2 text-[11px] text-zinc-500">
+              MediaRecorder / microphone not available in this environment.
+            </p>
+          ) : null}
         </div>
       </div>
     </div>

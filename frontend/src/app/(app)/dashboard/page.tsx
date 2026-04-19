@@ -8,7 +8,7 @@ export default function DashboardPage() {
           Dashboard
         </h1>
         <p className="mt-2 text-sm text-shell-muted">
-          Phase 1 shell — documents, cases, and copilot routes are wired; AI features
+          Phase 1 shell — documents and copilot routes are wired; AI features
           land in a later phase.
         </p>
       </div>

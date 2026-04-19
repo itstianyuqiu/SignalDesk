@@ -11,6 +11,7 @@ from uuid import UUID
 from langsmith import traceable
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import Settings
 from app.models.chat import ChatMessage, ChatSession
@@ -84,6 +85,40 @@ async def _load_prior_turns(
     return list(rows)
 
 
+def _user_message_metadata(
+    input_mode: str,
+    voice: dict[str, Any] | None,
+) -> dict[str, Any]:
+    meta: dict[str, Any] = {"input_mode": input_mode}
+    if input_mode == "voice" and voice:
+        meta["voice"] = voice
+    return meta
+
+
+def _rollup_voice_transcript(
+    chat: ChatSession,
+    *,
+    user_message_id: UUID,
+    transcript: str,
+    voice: dict[str, Any] | None,
+) -> None:
+    meta = dict(chat.metadata_ or {})
+    voice_block = dict(meta.get("voice") or {})
+    segments = list(voice_block.get("transcript_segments") or [])
+    entry: dict[str, Any] = {
+        "message_id": str(user_message_id),
+        "text": transcript.strip(),
+    }
+    if voice:
+        entry["stt"] = voice
+    segments.append(entry)
+    voice_block["transcript_segments"] = segments[-50:]
+    voice_block["last_input_mode"] = "voice"
+    meta["voice"] = voice_block
+    chat.metadata_ = meta
+    flag_modified(chat, "metadata_")
+
+
 def _history_lines(msgs: list[ChatMessage]) -> list[str]:
     lines: list[str] = []
     for m in msgs:
@@ -104,6 +139,8 @@ async def run_copilot_turn(
     session_id: UUID | None,
     message: str,
     settings: Settings,
+    input_mode: str = "text",
+    voice_metadata: dict[str, Any] | None = None,
 ) -> CopilotTurnResult:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
@@ -138,10 +175,20 @@ async def run_copilot_turn(
         role="user",
         content=text,
         position=pos,
-        metadata_={},
+        metadata_=_user_message_metadata(input_mode, voice_metadata),
     )
     session.add(user_row)
     await session.flush()
+
+    if input_mode == "voice":
+        chat_for_voice = await session.get(ChatSession, sid)
+        if chat_for_voice is not None:
+            _rollup_voice_transcript(
+                chat_for_voice,
+                user_message_id=user_row.id,
+                transcript=text,
+                voice=voice_metadata,
+            )
 
     prior = await _load_prior_turns(
         session,
@@ -240,6 +287,8 @@ async def stream_copilot_turn(
     session_id: UUID | None,
     message: str,
     settings: Settings,
+    input_mode: str = "text",
+    voice_metadata: dict[str, Any] | None = None,
 ):
     """
     Async generator: tool events, meta (sources), text deltas, then done with ids.
@@ -277,10 +326,20 @@ async def stream_copilot_turn(
         role="user",
         content=text,
         position=pos,
-        metadata_={},
+        metadata_=_user_message_metadata(input_mode, voice_metadata),
     )
     session.add(user_row)
     await session.flush()
+
+    if input_mode == "voice":
+        chat_for_voice = await session.get(ChatSession, sid)
+        if chat_for_voice is not None:
+            _rollup_voice_transcript(
+                chat_for_voice,
+                user_message_id=user_row.id,
+                transcript=text,
+                voice=voice_metadata,
+            )
 
     prior = await _load_prior_turns(session, sid, max_messages=settings.copilot_max_history_messages)
     history_msgs = [m for m in prior if m.id != user_row.id]
