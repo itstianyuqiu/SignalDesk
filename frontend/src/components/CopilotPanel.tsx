@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "@/lib/api-auth";
@@ -78,6 +79,7 @@ function parseSseBlocks(buffer: string): { events: unknown[]; rest: string } {
 }
 
 export function CopilotPanel() {
+  const router = useRouter();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [input, setInput] = useState("");
@@ -146,6 +148,15 @@ export function CopilotPanel() {
   }, []);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const fromUrl = params.get("session");
+    if (fromUrl) {
+      setSessionId(fromUrl);
+      localStorage.setItem(SESSION_KEY, fromUrl);
+      void loadHistory(fromUrl);
+      return;
+    }
     const stored = localStorage.getItem(SESSION_KEY);
     if (stored) {
       setSessionId(stored);
@@ -161,6 +172,7 @@ export function CopilotPanel() {
     setSessionInsights(null);
     setPendingVoiceMeta(null);
     setSpeechLanguage("auto");
+    router.replace("/copilot");
   };
 
   const toggleVoiceCapture = async () => {
