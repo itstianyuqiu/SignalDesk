@@ -83,8 +83,8 @@ export function DocumentsPanel() {
       if (!res.ok) {
         throw new Error(await readApiErrorMessage(res));
       }
-      const data = (await res.json()) as { chunk_count: number };
-      setUploadMessage(`Ingested: ${data.chunk_count} chunk(s).`);
+      await res.json();
+      setUploadMessage("Upload complete. Your library will refresh in a moment.");
       setFile(null);
       setTitle("");
       setTags("");
@@ -101,8 +101,7 @@ export function DocumentsPanel() {
       <section className="rounded-lg border border-shell-border bg-shell-panel p-5">
         <h2 className="text-sm font-semibold text-zinc-100">Upload</h2>
         <p className="mt-1 text-sm text-shell-muted">
-          Plain text or PDF. The API extracts text, chunks it, embeds with OpenAI, and stores vectors in
-          Postgres (pgvector).
+          Use plain text or PDF. We process the file so it can be searched and used in Copilot replies.
         </p>
         <form className="mt-4 space-y-3" onSubmit={(e) => void onUpload(e)}>
           <label className="block text-xs font-medium text-zinc-400">
@@ -137,7 +136,7 @@ export function DocumentsPanel() {
             disabled={uploading}
             className="rounded-md bg-zinc-100 px-3 py-2 text-sm font-medium text-zinc-900 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {uploading ? "Uploading…" : "Upload & ingest"}
+            {uploading ? "Uploading…" : "Upload"}
           </button>
           {uploadMessage ? (
             <p className="text-sm text-shell-muted" role="status">
@@ -150,7 +149,7 @@ export function DocumentsPanel() {
       <section className="overflow-hidden rounded-lg border border-shell-border">
         <div className="border-b border-shell-border bg-shell-panel px-4 py-3">
           <h2 className="text-sm font-semibold text-zinc-100">Your documents</h2>
-          <p className="text-xs text-shell-muted">Filtered to the signed-in user via Supabase JWT.</p>
+          <p className="text-xs text-shell-muted">Only you can see documents under your account.</p>
         </div>
         <table className="w-full text-left text-sm">
           <thead className="border-b border-shell-border bg-shell-bg text-xs uppercase tracking-wide text-zinc-500">

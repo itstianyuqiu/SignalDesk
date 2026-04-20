@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Support Intelligence Platform",
-  description: "Operational dashboard for support intelligence workflows.",
+  description: "AI workspace for support teams—documents, Copilot, and quality review in one place.",
 };
 
 export default function RootLayout({

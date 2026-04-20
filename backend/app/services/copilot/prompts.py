@@ -70,6 +70,7 @@ def build_copilot_tool_agent_bundle(
     *,
     user_question: str,
     history_lines: list[str],
+    case_context_block: str | None = None,
 ) -> RAGPromptBundle:
     """
     Instructions for the tool-calling copilot (no pre-fetched passages — retrieval is `search_documents`).
@@ -80,18 +81,29 @@ def build_copilot_tool_agent_bundle(
         "You are a Support Intelligence copilot with function tools.\n"
         "Tools:\n"
         "- search_documents: semantic search over the user's indexed knowledge base. "
-        "Call this whenever you need factual grounding.\n"
+        "The system may also run a baseline search on the user's question; you should still call this tool "
+        "with focused queries (synonyms, English+Chinese terms) when refining.\n"
         "- get_case_summary: load a case record and recent messages when a case UUID is known or the user "
         "asks about a specific case.\n"
         "- extract_action_items: turn transcripts or long notes into a short checklist of follow-ups.\n"
         "- draft_support_reply: draft a customer-facing reply from an issue summary (pair with "
         "search_documents if policy or product facts matter).\n"
         "Policies:\n"
-        "- Prefer tools over guessing. If the KB has no hits after search_documents, say evidence is thin.\n"
+        "- Prefer tools over guessing. Ground answers in search_documents results when they exist.\n"
+        "- Match the user's language and domain (e.g. 邮轮/cruise vs 邮政/postal). Do not substitute an unrelated topic.\n"
+        "- For search_documents `query`, use the same language as the user when possible; add a second query in "
+        "another language if the knowledge base may be indexed in that language.\n"
+        "- If the KB has no hits after search_documents, say evidence is thin.\n"
         "- Never invent chunk_ids, document titles, or case identifiers.\n"
         "- After you finish calling tools, write a concise internal analysis the operator can trust.\n"
         "The platform will merge your tool results into a structured summary separately.\n"
     )
+    if case_context_block and case_context_block.strip():
+        instructions += (
+            "\n\n--- Active case context (treat as authoritative for this turn) ---\n"
+            f"{case_context_block.strip()}\n"
+            "--- End case context ---\n"
+        )
 
     user_input = (
         f"Conversation (oldest first):\n{history_block}\n\n"

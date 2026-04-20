@@ -1,8 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { CaseStatusBadge } from "@/components/cases/caseUi";
 import { apiFetch } from "@/lib/api-auth";
 import { useVoiceCapture } from "@/hooks/useVoiceCapture";
 
@@ -50,6 +52,19 @@ type SessionInsights = {
   model?: string | null;
 };
 
+type CopilotCaseBanner = {
+  case: {
+    id: string;
+    caseKey: string;
+    title: string;
+    summary: string;
+    status: string;
+    priority: string;
+    category: string | null;
+    createdFromSessionId: string | null;
+  };
+};
+
 type VoiceMeta = {
   mime_type: string;
   duration_sec: number;
@@ -88,6 +103,10 @@ export function CopilotPanel() {
   const [transcribing, setTranscribing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sessionInsights, setSessionInsights] = useState<SessionInsights | null>(null);
+  const [activeCaseId, setActiveCaseId] = useState<string | null>(null);
+  const [caseBanner, setCaseBanner] = useState<CopilotCaseBanner | null>(null);
+  const [caseBannerLoading, setCaseBannerLoading] = useState(false);
+  const [creatingCase, setCreatingCase] = useState(false);
   const [pendingVoiceMeta, setPendingVoiceMeta] = useState<VoiceMeta | null>(null);
   /** Whisper language hint: English UI often sets `navigator.language` to en-* even when you speak Chinese. */
   const [speechLanguage, setSpeechLanguage] = useState<"auto" | "zh" | "en">("auto");
@@ -150,11 +169,21 @@ export function CopilotPanel() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     const params = new URLSearchParams(window.location.search);
+    const caseFromUrl = params.get("caseId");
     const fromUrl = params.get("session");
+    if (caseFromUrl) {
+      setActiveCaseId(caseFromUrl);
+    }
     if (fromUrl) {
       setSessionId(fromUrl);
       localStorage.setItem(SESSION_KEY, fromUrl);
       void loadHistory(fromUrl);
+      return;
+    }
+    if (caseFromUrl && !fromUrl) {
+      localStorage.removeItem(SESSION_KEY);
+      setSessionId(null);
+      setMessages([]);
       return;
     }
     const stored = localStorage.getItem(SESSION_KEY);
@@ -164,6 +193,29 @@ export function CopilotPanel() {
     }
   }, [loadHistory]);
 
+  useEffect(() => {
+    if (!activeCaseId) {
+      setCaseBanner(null);
+      return;
+    }
+    let cancelled = false;
+    setCaseBannerLoading(true);
+    void (async () => {
+      const res = await apiFetch(`/api/v1/cases/${activeCaseId}/copilot-context`);
+      if (cancelled) return;
+      if (res.ok) {
+        const data = (await res.json()) as CopilotCaseBanner;
+        setCaseBanner(data);
+      } else {
+        setCaseBanner(null);
+      }
+      setCaseBannerLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeCaseId]);
+
   const handleNewChat = () => {
     localStorage.removeItem(SESSION_KEY);
     setSessionId(null);
@@ -172,7 +224,40 @@ export function CopilotPanel() {
     setSessionInsights(null);
     setPendingVoiceMeta(null);
     setSpeechLanguage("auto");
+    setActiveCaseId(null);
+    setCaseBanner(null);
     router.replace("/copilot");
+  };
+
+  const exitCaseContext = () => {
+    setActiveCaseId(null);
+    setCaseBanner(null);
+    if (typeof window === "undefined") return;
+    const u = new URL(window.location.href);
+    u.searchParams.delete("caseId");
+    router.replace(`${u.pathname}${u.search}`);
+  };
+
+  const handleCreateCase = async () => {
+    if (!sessionId || messages.length === 0) return;
+    setCreatingCase(true);
+    setError(null);
+    try {
+      const res = await apiFetch("/api/v1/cases/from-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        setError(t || `Could not create case (${res.status})`);
+        return;
+      }
+      const data = (await res.json()) as { id: string };
+      router.push(`/cases/${data.id}`);
+    } finally {
+      setCreatingCase(false);
+    }
   };
 
   const toggleVoiceCapture = async () => {
@@ -285,6 +370,7 @@ export function CopilotPanel() {
       body: JSON.stringify({
         message: text,
         session_id: sessionId,
+        case_id: activeCaseId ?? undefined,
         input_mode: useVoiceTurn ? "voice" : "text",
         voice: useVoiceTurn
           ? {
@@ -477,19 +563,79 @@ export function CopilotPanel() {
     <div className="flex min-h-[60vh] flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm text-shell-muted">
-          The copilot calls tools (document search, case summary, action items, reply drafts) and
-          returns a structured support summary. Tool results are shown below each answer. Voice uses
-          your microphone, server-side Whisper transcription, then the same copilot workflow as
-          typed messages.
+          Copilot can search your documents, pull case context, and suggest replies and next steps. When
+          it looks something up, you will see that detail under the answer. Voice records from your
+          microphone, turns speech into text, and sends it like a typed message.
         </p>
-        <button
-          type="button"
-          onClick={() => handleNewChat()}
-          className="rounded-md border border-shell-border px-3 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800/60"
-        >
-          New chat
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => void handleCreateCase()}
+            disabled={
+              creatingCase ||
+              !sessionId ||
+              messages.length === 0 ||
+              streaming ||
+              loading
+            }
+            className="rounded-md border border-emerald-900/50 bg-emerald-950/30 px-3 py-1.5 text-xs font-medium text-emerald-100 transition-colors hover:bg-emerald-950/50 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {creatingCase ? "Creating…" : "Create case from conversation"}
+          </button>
+          <button
+            type="button"
+            onClick={() => handleNewChat()}
+            className="rounded-md border border-shell-border px-3 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-800/60"
+          >
+            New chat
+          </button>
+        </div>
       </div>
+
+      {activeCaseId ? (
+        <div className="rounded-lg border border-sky-900/50 bg-sky-950/20 p-4 text-sm">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 space-y-1">
+              <p className="text-[11px] font-medium uppercase tracking-wide text-sky-300/90">
+                Working in case context
+              </p>
+              {caseBannerLoading ? (
+                <p className="text-zinc-400">Loading case…</p>
+              ) : caseBanner ? (
+                <>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-xs text-zinc-500">
+                      {caseBanner.case.caseKey}
+                    </span>
+                    <CaseStatusBadge status={caseBanner.case.status} />
+                  </div>
+                  <p className="font-medium text-zinc-100">{caseBanner.case.title}</p>
+                  {caseBanner.case.summary ? (
+                    <p className="line-clamp-3 text-zinc-400">{caseBanner.case.summary}</p>
+                  ) : null}
+                  <Link
+                    href={`/cases/${caseBanner.case.id}`}
+                    className="inline-block text-xs text-shell-accent hover:underline"
+                  >
+                    View case
+                  </Link>
+                </>
+              ) : (
+                <p className="text-amber-200/90">
+                  Case context could not be loaded. You can exit and retry, or continue without it.
+                </p>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => exitCaseContext()}
+              className="shrink-0 rounded-md border border-shell-border px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800/60"
+            >
+              Exit case context
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {error ? (
         <div className="rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-200">
@@ -538,8 +684,8 @@ export function CopilotPanel() {
         <div className="max-h-[min(70vh,720px)] flex-1 space-y-4 overflow-y-auto p-4">
           {messages.length === 0 ? (
             <p className="text-sm text-shell-muted">
-              Ask for help with a case or your knowledge base. The assistant decides when to search
-              documents or load case context; you will see each tool result for transparency.
+              Ask about your knowledge library or a support case. When Copilot looks something up, the
+              steps and sources appear below each reply.
             </p>
           ) : null}
 
@@ -564,18 +710,15 @@ export function CopilotPanel() {
 
               {m.role === "assistant" && (m.toolCalls?.length ?? 0) > 0 ? (
                 <div className="w-full max-w-[95%] rounded-md border border-zinc-700/80 bg-zinc-900/40 p-3 text-xs md:max-w-[85%]">
-                  <p className="font-medium text-zinc-300">Tool execution</p>
+                  <p className="font-medium text-zinc-300">Steps Copilot took</p>
                   <p className="mt-0.5 text-[11px] text-zinc-500">
-                    Arguments and raw results as returned by the backend (validated before use).
+                    How this answer was assembled (lookups and results).
                   </p>
                   <ul className="mt-2 space-y-3">
                     {(m.toolCalls ?? []).map((t, idx) => (
                       <li key={`${t.call_id ?? idx}-${idx}`} className="rounded border border-zinc-800 bg-shell-bg/50 p-2">
                         <p className="font-mono text-[11px] text-emerald-300/90">
-                          {t.name ?? "tool"}
-                          {t.call_id ? (
-                            <span className="text-zinc-500"> · {t.call_id.slice(0, 10)}…</span>
-                          ) : null}
+                          {t.name ?? "lookup"}
                         </p>
                         {t.arguments ? (
                           <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words text-[11px] text-zinc-400">
@@ -595,7 +738,7 @@ export function CopilotPanel() {
 
               {m.role === "assistant" && m.structured ? (
                 <div className="w-full max-w-[95%] space-y-2 rounded-md border border-indigo-900/50 bg-indigo-950/25 p-3 text-xs md:max-w-[85%]">
-                  <p className="font-medium text-indigo-200/90">Structured output</p>
+                  <p className="font-medium text-indigo-200/90">Suggestions</p>
                   {m.structured.escalation ? (
                     <div className="rounded border border-indigo-900/40 bg-shell-bg/40 p-2">
                       <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
@@ -649,22 +792,17 @@ export function CopilotPanel() {
               m.sources.length > 0 &&
               m.content.length > 0 ? (
                 <div className="w-full max-w-[95%] rounded-md border border-dashed border-shell-border bg-shell-panel/30 p-3 text-xs md:max-w-[85%]">
-                  <p className="font-medium text-zinc-300">Sources (from search_documents)</p>
+                  <p className="font-medium text-zinc-300">Sources</p>
                   {m.weakEvidence ? (
                     <p className="mt-1 text-amber-200/90">
-                      Low confidence: retrieval runs were marked weak or empty. Treat the answer as
-                      tentative.
+                      Low confidence: little or no relevant text was found. Treat the answer as
+                      tentative and verify elsewhere if needed.
                     </p>
                   ) : null}
                   <ul className="mt-2 space-y-2">
                     {m.sources.map((s) => (
                       <li key={s.chunk_id} className="border-l-2 border-zinc-600 pl-2">
-                        <p className="font-mono text-[11px] text-zinc-400">
-                          {s.title}{" "}
-                          <span className="text-zinc-500">
-                            · score {s.score.toFixed(3)} · chunk {s.chunk_id.slice(0, 8)}…
-                          </span>
-                        </p>
+                        <p className="text-[13px] font-medium text-zinc-200">{s.title}</p>
                         <p className="mt-1 text-zinc-400">{s.excerpt}</p>
                       </li>
                     ))}
@@ -696,7 +834,7 @@ export function CopilotPanel() {
               disabled={voice.status === "recording" || transcribing}
               className="rounded border border-shell-border bg-shell-bg px-2 py-1 text-zinc-200"
             >
-              <option value="auto">Auto (browser locale)</option>
+              <option value="auto">Auto-detect</option>
               <option value="zh">中文 (Chinese)</option>
               <option value="en">English</option>
             </select>
@@ -706,7 +844,7 @@ export function CopilotPanel() {
           </div>
           {pendingVoiceMeta ? (
             <p className="mb-2 text-xs text-emerald-200/85">
-              Voice transcript (Whisper) — edit if needed, then Send.
+              Voice transcript — edit if needed, then send.
             </p>
           ) : null}
           <div className="flex gap-2">
@@ -733,7 +871,7 @@ export function CopilotPanel() {
               title={
                 voice.status === "recording"
                   ? "Stop recording and transcribe"
-                  : "Record voice (browser mic → Whisper)"
+                  : "Record with your microphone and transcribe to text"
               }
               onClick={() => void toggleVoiceCapture()}
               disabled={
@@ -761,7 +899,7 @@ export function CopilotPanel() {
           </div>
           {!voice.isSupported ? (
             <p className="mt-2 text-[11px] text-zinc-500">
-              MediaRecorder / microphone not available in this environment.
+              Microphone recording is not available in this browser or environment.
             </p>
           ) : null}
         </div>

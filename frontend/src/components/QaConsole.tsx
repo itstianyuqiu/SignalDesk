@@ -213,7 +213,7 @@ export function QaConsole() {
                         </dl>
                       </div>
                       <div>
-                        <h3 className="mb-1 font-medium text-zinc-400">Cost / LangSmith</h3>
+                        <h3 className="mb-1 font-medium text-zinc-400">Cost &amp; tracing</h3>
                         <p className="text-zinc-300">
                           est. USD:{" "}
                           <span className="font-mono">
@@ -284,7 +284,7 @@ export function QaConsole() {
                   {m.role === "assistant" && structured ? (
                     <details className="mt-4 text-xs">
                       <summary className="cursor-pointer text-zinc-400">
-                        Structured output (JSON)
+                        Structured output
                       </summary>
                       <pre className="mt-2 max-h-48 overflow-auto rounded border border-zinc-800/80 bg-zinc-950/50 p-2 text-[11px] text-zinc-400">
                         {JSON.stringify(structured, null, 2)}

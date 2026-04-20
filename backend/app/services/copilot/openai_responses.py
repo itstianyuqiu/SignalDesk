@@ -43,9 +43,11 @@ _SUPPORT_INTELLIGENCE_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "title": {"type": "string"},
                     "priority": {"type": "string", "enum": ["low", "medium", "high"]},
+                    # strict json_schema requires every property key to appear in `required`;
+                    # use empty string when no owner.
                     "owner": {"type": "string"},
                 },
-                "required": ["title", "priority"],
+                "required": ["title", "priority", "owner"],
                 "additionalProperties": False,
             },
         },
@@ -61,9 +63,12 @@ _SUPPORT_INTELLIGENCE_SCHEMA: dict[str, Any] = {
             "required": ["level", "rationale"],
             "additionalProperties": False,
         },
-        "support_reply_draft": {"type": "string"},
+        "support_reply_draft": {
+            "type": "string",
+            "description": "Optional customer reply; use empty string if none.",
+        },
     },
-    "required": ["answer", "action_items", "escalation"],
+    "required": ["answer", "action_items", "escalation", "support_reply_draft"],
     "additionalProperties": False,
 }
 

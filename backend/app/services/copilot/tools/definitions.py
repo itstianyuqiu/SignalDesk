@@ -14,7 +14,10 @@ _SEARCH_DOCUMENTS_PARAMETERS: dict[str, Any] = {
     "properties": {
         "query": {
             "type": "string",
-            "description": "Natural language search query over the user's indexed documents.",
+            "description": (
+                "Natural language search over embedded chunks. Use the same language as the user when possible; "
+                "repeat or paraphrase key terms. For mixed KBs, you may run a second search in English or Chinese."
+            ),
         },
         "top_k": {
             "type": "integer",

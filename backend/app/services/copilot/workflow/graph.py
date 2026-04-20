@@ -16,6 +16,7 @@ from app.services.copilot.workflow.nodes import (
     synthesize,
     tool_agent,
 )
+from app.services.copilot.bootstrap_retrieval import bootstrap_search_documents_trace
 from app.services.copilot.workflow.state import CopilotGraphContext, CopilotWorkflowState
 
 
@@ -91,6 +92,7 @@ async def run_support_intelligence_workflow(
     api_key: str,
     model: str,
     tool_ctx: ToolContext,
+    case_context_block: str | None = None,
 ) -> SupportIntelligenceWorkflowResult:
     graph = get_support_intelligence_graph()
     initial: CopilotWorkflowState = {
@@ -99,8 +101,14 @@ async def run_support_intelligence_workflow(
         "api_key": api_key,
         "model": model,
     }
+    if case_context_block and case_context_block.strip():
+        initial["case_context_block"] = case_context_block.strip()
+    bootstrap = await bootstrap_search_documents_trace(tool_ctx, user_question)
     out = await graph.ainvoke(
         initial,
-        context=CopilotGraphContext(tool_ctx=tool_ctx),
+        context=CopilotGraphContext(
+            tool_ctx=tool_ctx,
+            bootstrap_tool_trace=tuple(bootstrap),
+        ),
     )
     return workflow_result_from_state(out)

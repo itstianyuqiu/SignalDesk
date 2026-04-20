@@ -8,8 +8,8 @@ export default function QaPage() {
           QA Console
         </h1>
         <p className="mt-2 text-sm text-shell-muted">
-          Review copilot sessions: transcripts, retrieval sources, tool traces, latency
-          splits, and turn status. Deeper traces live in LangSmith when enabled server-side.
+          Review Copilot conversations in depth: what was said, which sources were used, tools invoked,
+          timing, and quality signals—so you can validate answers before wider use.
         </p>
       </div>
       <QaConsole />

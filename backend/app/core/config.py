@@ -80,10 +80,10 @@ class Settings(BaseSettings):
     )
     copilot_retrieval_top_k: int = Field(default=8, ge=1, le=32)
     copilot_min_evidence_score: float = Field(
-        default=0.22,
+        default=0.15,
         ge=0.0,
         le=1.0,
-        description="Below this max retrieval score, mark evidence as weak.",
+        description="Below this max retrieval score, mark evidence as weak (lower helps multilingual / short queries).",
     )
     copilot_max_history_messages: int = Field(default=12, ge=0, le=50)
 

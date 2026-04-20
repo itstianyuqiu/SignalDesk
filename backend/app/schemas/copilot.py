@@ -18,6 +18,10 @@ class CopilotChatRequest(BaseModel):
         default=None,
         description="Existing copilot session; omit to start a new session.",
     )
+    case_id: UUID | None = Field(
+        default=None,
+        description="When set, Copilot injects this case into context and links the session.",
+    )
     message: str = Field(min_length=1, max_length=12000)
     input_mode: Literal["text", "voice"] = Field(
         default="text",

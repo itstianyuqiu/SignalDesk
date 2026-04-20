@@ -15,6 +15,8 @@ class CopilotGraphContext:
     """Run-scoped dependencies (not checkpointed) injected via LangGraph `context=`."""
 
     tool_ctx: ToolContext
+    #: Prepended to model-produced tool_trace (deterministic KB search on user question).
+    bootstrap_tool_trace: tuple[dict[str, Any], ...] = ()
 
 
 class CopilotWorkflowState(TypedDict, total=False):
@@ -25,6 +27,7 @@ class CopilotWorkflowState(TypedDict, total=False):
     history_lines: Required[list[str]]
     api_key: Required[str]
     model: Required[str]
+    case_context_block: NotRequired[str]
 
     # --- Deterministic prep ---
     instructions: str

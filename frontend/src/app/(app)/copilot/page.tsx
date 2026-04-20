@@ -8,8 +8,8 @@ export default function CopilotPage() {
           Copilot
         </h1>
         <p className="mt-2 text-sm text-shell-muted">
-          Text RAG over your indexed documents: retrieval-backed answers with source excerpts and
-          explicit low-confidence signaling when evidence is weak.
+          Ask questions using your knowledge library. Replies include source excerpts, and Copilot tells you
+          when it is not confident in the evidence.
         </p>
       </div>
       <CopilotPanel />

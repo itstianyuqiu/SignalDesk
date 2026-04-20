@@ -15,6 +15,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import Settings
 from app.models.chat import ChatMessage, ChatSession
+from app.services.copilot.bootstrap_retrieval import bootstrap_search_documents_trace
 from app.services.copilot.tools.context import ToolContext
 from app.services.copilot.trace_context import (
     SourceOut,
@@ -131,6 +132,32 @@ def _history_lines(msgs: list[ChatMessage]) -> list[str]:
     return lines
 
 
+async def _resolve_case_context_for_turn(
+    session: AsyncSession,
+    user_id: UUID,
+    case_id: UUID | None,
+    chat: ChatSession,
+) -> str | None:
+    from app.models.case import Case
+    from app.services.cases.access import user_can_access_case
+    from app.services.cases.context_block import build_case_context_block
+
+    target = case_id if case_id is not None else chat.case_id
+    if target is None:
+        return None
+    row = await session.get(Case, target)
+    if row is None:
+        raise ValueError("Case not found")
+    if not await user_can_access_case(session, case=row, user_id=user_id):
+        raise ValueError("Case not found")
+    if case_id is not None:
+        if chat.case_id is None:
+            chat.case_id = case_id
+        elif chat.case_id != case_id:
+            raise ValueError("This conversation is already linked to a different case")
+    return await build_case_context_block(session, case_id=target)
+
+
 @traceable(name="copilot.turn", run_type="chain")
 async def run_copilot_turn(
     session: AsyncSession,
@@ -141,6 +168,7 @@ async def run_copilot_turn(
     settings: Settings,
     input_mode: str = "text",
     voice_metadata: dict[str, Any] | None = None,
+    case_id: UUID | None = None,
 ) -> CopilotTurnResult:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
@@ -152,13 +180,24 @@ async def run_copilot_turn(
     turn_t0 = time.perf_counter()
 
     if session_id is None:
+        if case_id is not None:
+            from app.models.case import Case
+            from app.services.cases.access import user_can_access_case
+
+            crow = await session.get(Case, case_id)
+            if crow is None or not await user_can_access_case(session, case=crow, user_id=user_id):
+                raise ValueError("Case not found")
         title = text.replace("\r\n", " ")[:120] or "Copilot"
+        meta: dict[str, Any] = {"kind": "copilot"}
+        if case_id is not None:
+            meta["opened_from_case_id"] = str(case_id)
         chat = ChatSession(
             user_id=user_id,
             title=title,
             status="active",
             channel="copilot",
-            metadata_={"kind": "copilot"},
+            case_id=case_id,
+            metadata_=meta,
         )
         session.add(chat)
         await session.flush()
@@ -168,6 +207,9 @@ async def run_copilot_turn(
         if chat is None or chat.user_id != user_id:
             raise ValueError("Session not found")
         sid = chat.id
+
+    case_block = await _resolve_case_context_for_turn(session, user_id, case_id, chat)
+    await session.flush()
 
     pos = await _next_message_position(session, sid)
     user_row = ChatMessage(
@@ -214,6 +256,7 @@ async def run_copilot_turn(
         api_key=settings.openai_api_key,
         model=settings.copilot_model,
         tool_ctx=tool_ctx,
+        case_context_block=case_block,
     )
     agent_loop_ms = wf.agent_loop_ms
     synthesis_ms = wf.synthesis_ms
@@ -289,6 +332,7 @@ async def stream_copilot_turn(
     settings: Settings,
     input_mode: str = "text",
     voice_metadata: dict[str, Any] | None = None,
+    case_id: UUID | None = None,
 ):
     """
     Async generator: tool events, meta (sources), text deltas, then done with ids.
@@ -303,13 +347,24 @@ async def stream_copilot_turn(
     turn_t0 = time.perf_counter()
 
     if session_id is None:
+        if case_id is not None:
+            from app.models.case import Case
+            from app.services.cases.access import user_can_access_case
+
+            crow = await session.get(Case, case_id)
+            if crow is None or not await user_can_access_case(session, case=crow, user_id=user_id):
+                raise ValueError("Case not found")
         title = text.replace("\r\n", " ")[:120] or "Copilot"
+        meta_s: dict[str, Any] = {"kind": "copilot"}
+        if case_id is not None:
+            meta_s["opened_from_case_id"] = str(case_id)
         chat = ChatSession(
             user_id=user_id,
             title=title,
             status="active",
             channel="copilot",
-            metadata_={"kind": "copilot"},
+            case_id=case_id,
+            metadata_=meta_s,
         )
         session.add(chat)
         await session.flush()
@@ -319,6 +374,9 @@ async def stream_copilot_turn(
         if chat is None or chat.user_id != user_id:
             raise ValueError("Session not found")
         sid = chat.id
+
+    case_block = await _resolve_case_context_for_turn(session, user_id, case_id, chat)
+    await session.flush()
 
     pos = await _next_message_position(session, sid)
     user_row = ChatMessage(
@@ -362,10 +420,14 @@ async def stream_copilot_turn(
         "api_key": settings.openai_api_key,
         "model": settings.copilot_model,
     }
+    if case_block:
+        base["case_context_block"] = case_block
     after_prep: CopilotWorkflowState = {**base, **prepare_context(base)}
     tool_updates = await execute_tool_agent_phase(after_prep, tool_ctx)
     agent_loop_ms = float(tool_updates.get("agent_loop_ms") or 0.0)
-    after_agent: CopilotWorkflowState = {**after_prep, **tool_updates}
+    bootstrap = await bootstrap_search_documents_trace(tool_ctx, text)
+    merged_trace = list(bootstrap) + list(tool_updates.get("tool_trace") or [])
+    after_agent: CopilotWorkflowState = {**after_prep, **tool_updates, "tool_trace": merged_trace}
 
     for step in after_agent.get("tool_trace") or []:
         yield {

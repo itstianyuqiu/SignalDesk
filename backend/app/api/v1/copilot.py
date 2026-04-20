@@ -87,6 +87,7 @@ async def copilot_chat(
             settings=settings,
             input_mode=body.input_mode,
             voice_metadata=body.voice,
+            case_id=body.case_id,
         )
     except ValueError as exc:
         if str(exc) == "Session not found":
@@ -119,6 +120,7 @@ async def copilot_chat_stream(
                     settings=settings,
                     input_mode=body.input_mode,
                     voice_metadata=body.voice,
+                    case_id=body.case_id,
                 ):
                     yield f"data: {json.dumps(item, default=str)}\n\n".encode("utf-8")
         except ValueError as exc:

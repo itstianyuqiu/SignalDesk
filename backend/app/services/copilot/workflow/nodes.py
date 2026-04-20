@@ -25,9 +25,11 @@ logger = logging.getLogger(__name__)
 @traceable(name="copilot.workflow.prepare_context", run_type="chain")
 def prepare_context(state: CopilotWorkflowState) -> dict[str, Any]:
     """Deterministic: build instructions + user turn from history (no LLM)."""
+    cc = state.get("case_context_block")
     bundle = build_copilot_tool_agent_bundle(
         user_question=state["user_question"],
         history_lines=state["history_lines"],
+        case_context_block=cc if isinstance(cc, str) and cc.strip() else None,
     )
     return {"instructions": bundle.instructions, "user_input": bundle.user_input}
 
@@ -84,7 +86,12 @@ async def tool_agent(
     *,
     runtime: Runtime[CopilotGraphContext],
 ) -> dict[str, Any]:
-    return await execute_tool_agent_phase(state, runtime.context.tool_ctx)
+    updates = await execute_tool_agent_phase(state, runtime.context.tool_ctx)
+    trace = list(updates.get("tool_trace") or [])
+    boot = runtime.context.bootstrap_tool_trace
+    if boot:
+        trace = list(boot) + trace
+    return {**updates, "tool_trace": trace}
 
 
 @traceable(name="copilot.workflow.extract_retrieval", run_type="chain")

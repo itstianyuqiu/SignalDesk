@@ -8,8 +8,7 @@ export default function DocumentsPage() {
           Documents
         </h1>
         <p className="mt-2 text-sm text-shell-muted">
-          Upload text or PDFs for chunking, embeddings (OpenAI), and pgvector storage. Retrieval API:{" "}
-          <code className="font-mono text-xs text-shell-accent">POST /api/v1/retrieve</code>.
+          Add text or PDFs so Copilot can search them and cite sources in answers.
         </p>
       </div>
       <DocumentsPanel />
