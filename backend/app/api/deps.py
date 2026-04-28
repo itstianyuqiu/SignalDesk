@@ -107,7 +107,6 @@ def _decode_supabase_access_token(token: str, settings: Settings) -> dict:
 
 
 async def get_current_user_id(
-    session: Annotated[AsyncSession, Depends(get_db)],
     token: Annotated[str, Depends(get_bearer_token)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> UUID:
@@ -120,6 +119,13 @@ async def get_current_user_id(
     except (ValueError, TypeError):
         raise HTTPException(status_code=401, detail="Invalid token: sub is not a UUID") from None
 
+    return user_id
+
+
+async def ensure_current_user_profile(
+    session: Annotated[AsyncSession, Depends(get_db)],
+    user_id: Annotated[UUID, Depends(get_current_user_id)],
+) -> UUID:
     # Supabase runs a DB trigger to insert public.users; local Docker DB has no auth.users trigger.
     try:
         await session.execute(
@@ -138,3 +144,4 @@ async def get_current_user_id(
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 CurrentUserId = Annotated[UUID, Depends(get_current_user_id)]
+CurrentUserIdEnsured = Annotated[UUID, Depends(ensure_current_user_profile)]

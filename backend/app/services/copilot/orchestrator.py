@@ -69,6 +69,20 @@ async def _next_message_position(session: AsyncSession, session_id: UUID) -> int
     return int(mx) + 1
 
 
+async def _load_chat_session_for_update(
+    session: AsyncSession,
+    *,
+    session_id: UUID,
+    user_id: UUID,
+) -> ChatSession | None:
+    stmt = (
+        select(ChatSession)
+        .where(ChatSession.id == session_id, ChatSession.user_id == user_id)
+        .with_for_update()
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
 async def _load_prior_turns(
     session: AsyncSession,
     session_id: UUID,
@@ -203,8 +217,12 @@ async def run_copilot_turn(
         await session.flush()
         sid = chat.id
     else:
-        chat = await session.get(ChatSession, session_id)
-        if chat is None or chat.user_id != user_id:
+        chat = await _load_chat_session_for_update(
+            session,
+            session_id=session_id,
+            user_id=user_id,
+        )
+        if chat is None:
             raise ValueError("Session not found")
         sid = chat.id
 
@@ -370,8 +388,12 @@ async def stream_copilot_turn(
         await session.flush()
         sid = chat.id
     else:
-        chat = await session.get(ChatSession, session_id)
-        if chat is None or chat.user_id != user_id:
+        chat = await _load_chat_session_for_update(
+            session,
+            session_id=session_id,
+            user_id=user_id,
+        )
+        if chat is None:
             raise ValueError("Session not found")
         sid = chat.id
 

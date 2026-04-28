@@ -7,7 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from app.api.deps import CurrentUserId, DbSession
+from app.api.deps import CurrentUserId, CurrentUserIdEnsured, DbSession
 from app.core.config import Settings, get_settings
 from app.schemas.cases_api import (
     CaseBriefOut,
@@ -46,7 +46,7 @@ async def list_cases(
 async def create_case_from_session(
     body: CreateCaseFromSessionBody,
     session: DbSession,
-    user_id: CurrentUserId,
+    user_id: CurrentUserIdEnsured,
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> CaseDetailOut:
     try:

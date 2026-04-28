@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Annotated, AsyncIterator
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUserId, DbSession
+from app.api.deps import CurrentUserId, CurrentUserIdEnsured, DbSession
 from app.db.session import get_session_factory
 from app.core.config import Settings, get_settings
 from app.models.chat import ChatMessage, ChatSession
@@ -30,6 +31,7 @@ from app.services.copilot.session_insights import generate_and_persist_session_i
 from app.services.copilot.voice_transcription import transcribe_audio_bytes
 
 router = APIRouter(prefix="/copilot", tags=["copilot"])
+_log = logging.getLogger(__name__)
 
 _WHISPER_MODEL = "whisper-1"
 _MAX_VOICE_BYTES = 15 * 1024 * 1024
@@ -73,7 +75,7 @@ def _to_response(result: CopilotTurnResult) -> CopilotChatResponse:
 async def copilot_chat(
     body: CopilotChatRequest,
     session: DbSession,
-    user_id: CurrentUserId,
+    user_id: CurrentUserIdEnsured,
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> CopilotChatResponse:
     if not settings.openai_api_key:
@@ -100,8 +102,9 @@ async def copilot_chat(
 
 @router.post("/chat/stream")
 async def copilot_chat_stream(
+    request: Request,
     body: CopilotChatRequest,
-    user_id: CurrentUserId,
+    user_id: CurrentUserIdEnsured,
     settings: Annotated[Settings, Depends(get_settings)],
 ):
     """SSE stream; opens its own DB session so the connection outlives the HTTP handler return."""
@@ -127,10 +130,22 @@ async def copilot_chat_stream(
             err = {"event": "error", "detail": str(exc)}
             yield f"data: {json.dumps(err)}\n\n".encode("utf-8")
         except RuntimeError as exc:
-            err = {"event": "error", "detail": str(exc)}
+            request_id = getattr(request.state, "request_id", None)
+            _log.exception("copilot stream runtime error (request_id=%s)", request_id)
+            err = {
+                "event": "error",
+                "detail": "Service temporarily unavailable.",
+                "request_id": request_id,
+            }
             yield f"data: {json.dumps(err)}\n\n".encode("utf-8")
         except Exception as exc:
-            err = {"event": "error", "detail": f"{type(exc).__name__}: {exc}"}
+            request_id = getattr(request.state, "request_id", None)
+            _log.exception("copilot stream failed (request_id=%s)", request_id)
+            err = {
+                "event": "error",
+                "detail": "Unexpected server error.",
+                "request_id": request_id,
+            }
             yield f"data: {json.dumps(err, default=str)}\n\n".encode("utf-8")
 
     return StreamingResponse(
@@ -180,7 +195,7 @@ async def transcribe_voice_clip(
 async def create_session_insights(
     session_id: UUID,
     session: DbSession,
-    user_id: CurrentUserId,
+    user_id: CurrentUserIdEnsured,
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> SessionInsightsOut:
     """Generate session summary, action items, and case tags; persisted on session metadata."""
@@ -248,7 +263,7 @@ async def list_session_messages(
     user_id: CurrentUserId,
 ) -> list[CopilotMessageOut]:
     chat = await session.get(ChatSession, session_id)
-    if chat is None or chat.user_id != user_id:
+    if chat is None or chat.user_id != user_id or chat.channel != "copilot":
         raise HTTPException(status_code=404, detail="Session not found")
     stmt = (
         select(ChatMessage)

@@ -1,4 +1,5 @@
 import logging
+from uuid import uuid4
 
 from app.core.config import get_settings
 from app.services.observability.langsmith_setup import configure_langsmith
@@ -40,17 +41,30 @@ def create_app() -> FastAPI:
 
     @application.middleware("http")
     async def unhandled_exception_middleware(request: Request, call_next):
+        request_id = str(uuid4())
+        request.state.request_id = request_id
         try:
-            return await call_next(request)
+            response = await call_next(request)
+            response.headers["X-Request-ID"] = request_id
+            return response
         except StarletteHTTPException:
             raise
         except RequestValidationError:
             raise
         except Exception as exc:
-            _log.exception("%s %s", request.method, request.url.path)
+            _log.exception(
+                "%s %s failed (request_id=%s)",
+                request.method,
+                request.url.path,
+                request_id,
+            )
             return JSONResponse(
                 status_code=500,
-                content={"detail": f"{type(exc).__name__}: {exc}"},
+                headers={"X-Request-ID": request_id},
+                content={
+                    "detail": "Internal server error.",
+                    "request_id": request_id,
+                },
             )
 
     # Root health for load balancers / probes (no version prefix).

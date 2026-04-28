@@ -6,7 +6,7 @@ from openai import APIError
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.api.deps import CurrentUserId, DbSession
+from app.api.deps import CurrentUserId, CurrentUserIdEnsured, DbSession
 from app.api.openai_errors import raise_http_from_openai
 from app.core.config import Settings, get_settings
 from app.models.document import Document
@@ -69,7 +69,7 @@ async def list_documents(
 @router.post("/ingest", response_model=IngestResponse)
 async def ingest_document(
     session: DbSession,
-    user_id: CurrentUserId,
+    user_id: CurrentUserIdEnsured,
     settings: Annotated[Settings, Depends(get_settings)],
     file: UploadFile = File(...),
     title: str | None = Form(default=None),
