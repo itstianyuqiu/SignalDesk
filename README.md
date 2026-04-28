@@ -69,6 +69,7 @@ Run against **Supabase** (SQL Editor or CLI) or any Postgres whose connection st
 | 002 | `database/migrations/002_pgvector_rag.sql` | Enables `vector`, adds embeddings + HNSW index. |
 | 003 | `database/migrations/003_local_docker_no_auth.sql` | **Local Docker only.** Supabase-free schema (replaces 001/002). |
 | 004 | `database/migrations/004_cases_workflow.sql` | Adds `summary` / `priority` / `category` / `created_from_session_id` on `cases`, plus `case_action_items` and `case_documents`. Stubs `auth.uid()` on plain Postgres so RLS policies still apply. |
+| 005 | `database/migrations/005_messages_session_position_unique.sql` | Enforces unique `(session_id, position)` ordering for transcript messages and stops if duplicates already exist. |
 
 **Local Docker (pgvector):** the compose file uses `pgvector/pgvector:pg16`. If you previously ran plain `postgres:16`, run `docker compose down -v` once (this wipes local DB data) and then `docker compose up -d`.
 
@@ -215,6 +216,8 @@ Exit code is non-zero if any case fails its expectations (groundedness floor, re
 | `frontend` | `npm run build` | Production build. |
 | `backend`  | `uvicorn app.main:app --reload` | API server. |
 | `backend`  | `python -m app.eval.cli --dataset …` | Copilot eval harness. |
+
+| `backend`  | `python -m unittest discover -s tests -v` | Backend unit tests. |
 
 ## Environment summary
 

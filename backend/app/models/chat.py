@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Text, func, text
+from sqlalchemy import DateTime, ForeignKey, Integer, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM, JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -76,7 +76,10 @@ class ChatSession(Base):
 
 class ChatMessage(Base):
     __tablename__ = "messages"
-    __table_args__ = {"schema": "public"}
+    __table_args__ = (
+        UniqueConstraint("session_id", "position", name="messages_session_position_uidx"),
+        {"schema": "public"},
+    )
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),

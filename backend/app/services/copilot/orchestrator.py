@@ -10,6 +10,7 @@ from uuid import UUID
 
 from langsmith import traceable
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -56,6 +57,13 @@ def _serialize_sources(sources: list[SourceOut]) -> list[dict]:
         }
         for s in sources
     ]
+
+
+def _history_line(role: str, content: str) -> str:
+    text = content.strip().replace("\r\n", "\n")
+    if len(text) > 6000:
+        text = text[:6000] + "..."
+    return f"{role.upper()}: {text}"
 
 
 async def _next_message_position(session: AsyncSession, session_id: UUID) -> int:
@@ -146,6 +154,87 @@ def _history_lines(msgs: list[ChatMessage]) -> list[str]:
     return lines
 
 
+def _is_message_position_conflict(exc: IntegrityError) -> bool:
+    text = str(getattr(exc, "orig", exc)).lower()
+    return (
+        "messages_session_position_uidx" in text
+        or "unique constraint" in text and "session_id" in text and "position" in text
+        or "duplicate key value violates unique constraint" in text and "position" in text
+    )
+
+
+async def _persist_turn_with_retry(
+    session: AsyncSession,
+    *,
+    session_id: UUID,
+    user_id: UUID,
+    user_content: str,
+    user_metadata: dict[str, Any],
+    assistant_content: str,
+    assistant_metadata: dict[str, Any],
+    input_mode: str,
+    voice_metadata: dict[str, Any] | None,
+    allow_retry: bool,
+    max_attempts: int = 2,
+) -> tuple[ChatMessage, ChatMessage]:
+    for attempt in range(max_attempts):
+        if attempt > 0:
+            chat = await _load_chat_session_for_update(
+                session,
+                session_id=session_id,
+                user_id=user_id,
+            )
+            if chat is None:
+                raise ValueError("Session not found")
+        else:
+            chat = await session.get(ChatSession, session_id)
+            if chat is None:
+                raise ValueError("Session not found")
+
+        pos = await _next_message_position(session, session_id)
+        user_row = ChatMessage(
+            session_id=session_id,
+            role="user",
+            content=user_content,
+            position=pos,
+            metadata_=user_metadata,
+        )
+        session.add(user_row)
+        await session.flush()
+
+        if input_mode == "voice":
+            _rollup_voice_transcript(
+                chat,
+                user_message_id=user_row.id,
+                transcript=user_content,
+                voice=voice_metadata,
+            )
+
+        assistant_row = ChatMessage(
+            session_id=session_id,
+            role="assistant",
+            content=assistant_content,
+            position=pos + 1,
+            metadata_=assistant_metadata,
+        )
+        session.add(assistant_row)
+        chat.updated_at = datetime.now(timezone.utc)
+
+        try:
+            await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            if not allow_retry or attempt >= max_attempts - 1 or not _is_message_position_conflict(exc):
+                raise
+            continue
+
+        await session.refresh(user_row)
+        await session.refresh(assistant_row)
+        return user_row, assistant_row
+
+    raise RuntimeError("Message persistence retries exhausted.")
+
+
 async def _resolve_case_context_for_turn(
     session: AsyncSession,
     user_id: UUID,
@@ -192,6 +281,7 @@ async def run_copilot_turn(
         raise ValueError("Message must not be empty.")
 
     turn_t0 = time.perf_counter()
+    created_new_session = session_id is None
 
     if session_id is None:
         if case_id is not None:
@@ -229,35 +319,13 @@ async def run_copilot_turn(
     case_block = await _resolve_case_context_for_turn(session, user_id, case_id, chat)
     await session.flush()
 
-    pos = await _next_message_position(session, sid)
-    user_row = ChatMessage(
-        session_id=sid,
-        role="user",
-        content=text,
-        position=pos,
-        metadata_=_user_message_metadata(input_mode, voice_metadata),
-    )
-    session.add(user_row)
-    await session.flush()
-
-    if input_mode == "voice":
-        chat_for_voice = await session.get(ChatSession, sid)
-        if chat_for_voice is not None:
-            _rollup_voice_transcript(
-                chat_for_voice,
-                user_message_id=user_row.id,
-                transcript=text,
-                voice=voice_metadata,
-            )
-
     prior = await _load_prior_turns(
         session,
         sid,
         max_messages=settings.copilot_max_history_messages,
     )
-    history_msgs = [m for m in prior if m.id != user_row.id]
-    history_msgs.append(user_row)
-    history_lines = _history_lines(history_msgs)
+    history_lines = _history_lines(prior)
+    history_lines.append(_history_line("user", text))
 
     metrics = CopilotTurnMetrics()
     tool_ctx = ToolContext(
@@ -296,13 +364,14 @@ async def run_copilot_turn(
         weak_evidence=weak,
     )
 
-    assistant_pos = pos + 1
-    assistant_row = ChatMessage(
+    user_row, assistant_row = await _persist_turn_with_retry(
+        session,
         session_id=sid,
-        role="assistant",
-        content=answer,
-        position=assistant_pos,
-        metadata_={
+        user_id=user_id,
+        user_content=text,
+        user_metadata=_user_message_metadata(input_mode, voice_metadata),
+        assistant_content=answer,
+        assistant_metadata={
             "sources": _serialize_sources(sources),
             "weak_evidence": weak,
             "model": settings.copilot_model,
@@ -318,16 +387,10 @@ async def run_copilot_turn(
             },
             "observability": observability,
         },
+        input_mode=input_mode,
+        voice_metadata=voice_metadata,
+        allow_retry=not created_new_session,
     )
-    session.add(assistant_row)
-
-    chat = await session.get(ChatSession, sid)
-    if chat is not None:
-        chat.updated_at = datetime.now(timezone.utc)
-
-    await session.commit()
-    await session.refresh(user_row)
-    await session.refresh(assistant_row)
 
     return CopilotTurnResult(
         session_id=sid,
@@ -363,6 +426,7 @@ async def stream_copilot_turn(
         raise ValueError("Message must not be empty.")
 
     turn_t0 = time.perf_counter()
+    created_new_session = session_id is None
 
     if session_id is None:
         if case_id is not None:
@@ -400,31 +464,9 @@ async def stream_copilot_turn(
     case_block = await _resolve_case_context_for_turn(session, user_id, case_id, chat)
     await session.flush()
 
-    pos = await _next_message_position(session, sid)
-    user_row = ChatMessage(
-        session_id=sid,
-        role="user",
-        content=text,
-        position=pos,
-        metadata_=_user_message_metadata(input_mode, voice_metadata),
-    )
-    session.add(user_row)
-    await session.flush()
-
-    if input_mode == "voice":
-        chat_for_voice = await session.get(ChatSession, sid)
-        if chat_for_voice is not None:
-            _rollup_voice_transcript(
-                chat_for_voice,
-                user_message_id=user_row.id,
-                transcript=text,
-                voice=voice_metadata,
-            )
-
     prior = await _load_prior_turns(session, sid, max_messages=settings.copilot_max_history_messages)
-    history_msgs = [m for m in prior if m.id != user_row.id]
-    history_msgs.append(user_row)
-    history_lines = _history_lines(history_msgs)
+    history_lines = _history_lines(prior)
+    history_lines.append(_history_line("user", text))
 
     metrics = CopilotTurnMetrics()
     tool_ctx = ToolContext(
@@ -490,12 +532,14 @@ async def stream_copilot_turn(
 
     yield {"event": "delta", "text": answer}
 
-    assistant_row = ChatMessage(
+    user_row, assistant_row = await _persist_turn_with_retry(
+        session,
         session_id=sid,
-        role="assistant",
-        content=answer,
-        position=pos + 1,
-        metadata_={
+        user_id=user_id,
+        user_content=text,
+        user_metadata=_user_message_metadata(input_mode, voice_metadata),
+        assistant_content=answer,
+        assistant_metadata={
             "sources": _serialize_sources(sources),
             "weak_evidence": weak,
             "model": settings.copilot_model,
@@ -511,14 +555,10 @@ async def stream_copilot_turn(
             },
             "observability": observability,
         },
+        input_mode=input_mode,
+        voice_metadata=voice_metadata,
+        allow_retry=not created_new_session,
     )
-    session.add(assistant_row)
-    chat2 = await session.get(ChatSession, sid)
-    if chat2 is not None:
-        chat2.updated_at = datetime.now(timezone.utc)
-    await session.commit()
-    await session.refresh(user_row)
-    await session.refresh(assistant_row)
 
     yield {
         "event": "done",
